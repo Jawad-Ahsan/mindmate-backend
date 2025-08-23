@@ -40,12 +40,14 @@ from .registeration.register_patient import router as minimal_patient_registrati
 from .registeration.verify_email import router as email_verification_router
 from .authentication.authenticate import router as user_auth_router
 from .specialist_routes.complete_profile import router as profile_completion_router
+from .specialist_routes.specialists_sma_routes import router as specialists_sma_router
 from .users import router as users_router
 from .questionnaires import router as questionnaires_router
 from .chat import router as chat_router
 from .journal import router as journal_router
 from .forum import router as forum_router
 from .admin import router as admin_router
+from .agents_routes.sma_router import router as sma_router
 
 # Create main auth router
 router = APIRouter()
@@ -60,12 +62,14 @@ router.include_router(email_verification_router)
 router.include_router(user_auth_router)
 
 router.include_router(profile_completion_router)
+router.include_router(specialists_sma_router)
 router.include_router(users_router)
 router.include_router(questionnaires_router)
 router.include_router(chat_router)
 router.include_router(journal_router)
 router.include_router(forum_router)
 router.include_router(admin_router)
+router.include_router(sma_router)
 
 # router.include_router(patient_authentication_router)
 # router.include_router(admin_router)            # Creates "auth" tag

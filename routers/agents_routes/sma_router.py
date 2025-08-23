@@ -20,6 +20,7 @@ from agents.sma.sma import SMA
 from agents.sma.sma_schemas import (
     SpecialistSearchRequest, TopSpecialistsRequest, SlotHoldRequest,
     AppointmentConfirmRequest, AppointmentCancelRequest, AppointmentRescheduleRequest,
+    RequestAppointmentRequest, RequestAppointmentResponse,
     SpecialistSearchResponse, TopSpecialistsResponse, SlotHoldResponse,
     AppointmentConfirmResponse, AppointmentListResponse, HealthCheckResponse,
     ConsultationMode, SortOption, SlotStatus, AppointmentStatus
@@ -29,7 +30,19 @@ from agents.sma.sma_schemas import (
 logger = logging.getLogger(__name__)
 
 # Create router
-router = APIRouter(prefix="/sma", tags=["Specialist Matching Agent"])
+router = APIRouter(tags=["Specialist Matching Agent"])
+
+# Test endpoint to verify router is working
+@router.get("/test")
+async def test_endpoint():
+    """Test endpoint to verify SMA router is working"""
+    return {"message": "SMA router is working", "status": "ok"}
+
+# Simple test endpoint without dependencies
+@router.get("/test-simple")
+async def test_simple_endpoint():
+    """Simple test endpoint without any dependencies"""
+    return {"message": "Simple test endpoint working", "status": "ok"}
 
 # ============================================================================
 # DEPENDENCY INJECTION
@@ -113,6 +126,8 @@ async def search_specialists(
     sma: SMA = Depends(get_sma)
 ):
     """Search specialists with filters and pagination"""
+    
+    logger.info(f"Search specialists endpoint called with params: query={query}, page={page}, size={size}")
     
     try:
         # Parse comma-separated lists
@@ -386,8 +401,103 @@ async def confirm_appointment(
         )
 
 # ============================================================================
+# APPOINTMENT REQUEST ENDPOINTS
+# ============================================================================
+
+@router.post(
+    "/appointments/request",
+    response_model=RequestAppointmentResponse,
+    summary="Request Appointment",
+    description="""
+    Request an appointment with a specialist (requires approval).
+    
+    **Process:**
+    1. Patient requests appointment with specialist
+    2. Specialist receives notification
+    3. Specialist can approve/reject the request
+    4. Patient is notified of the decision
+    
+    **Access:** Authenticated patients
+    """,
+    responses={
+        200: {"description": "Appointment request sent successfully"},
+        400: {"description": "Invalid request parameters"},
+        404: {"description": "Specialist not found"},
+        500: {"description": "Internal server error"}
+    }
+)
+async def request_appointment(
+    request: RequestAppointmentRequest,
+    current_patient = Depends(get_current_patient),
+    sma: SMA = Depends(get_sma)
+):
+    """Request an appointment with a specialist"""
+    
+    try:
+        result = sma.request_appointment(current_patient.id, request)
+        return RequestAppointmentResponse(**result)
+        
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.error(f"Error requesting appointment: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error"
+        )
+
+# ============================================================================
 # APPOINTMENT MANAGEMENT ENDPOINTS
 # ============================================================================
+
+@router.get(
+    "/appointments/my-appointments",
+    response_model=AppointmentListResponse,
+    summary="Get My Appointments",
+    description="""
+    Get appointments for the current authenticated patient.
+    
+    **Features:**
+    - Paginated results
+    - Filter by appointment status
+    - Include specialist details
+    - Sort by appointment date
+    
+    **Access:** Authenticated patients (own appointments)
+    """,
+    responses={
+        200: {"description": "Appointments retrieved successfully"},
+        500: {"description": "Internal server error"}
+    }
+)
+async def get_my_appointments(
+    page: int = Query(1, ge=1, description="Page number"),
+    size: int = Query(20, ge=1, le=100, description="Results per page"),
+    status_filter: Optional[AppointmentStatus] = Query(None, description="Filter by appointment status"),
+    
+    current_patient = Depends(get_current_patient),
+    sma: SMA = Depends(get_sma)
+):
+    """Get appointments for the current authenticated patient"""
+    
+    try:
+        result = sma.get_patient_appointments(current_patient.id, page, size, status_filter.value if status_filter else None)
+        return AppointmentListResponse(**result)
+        
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.error(f"Error getting patient appointments: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve appointments"
+        )
 
 @router.get(
     "/appointments/patient/{patient_id}",

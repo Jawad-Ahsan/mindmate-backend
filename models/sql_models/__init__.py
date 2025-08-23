@@ -6,6 +6,7 @@ from .specialist_models import (
     SpecialistDocuments,
     SpecialistsApprovalData,
     SpecialistsAuthInfo,
+    SpecialistSpecializations,
 )
 from .patient_models import (
     Patient,
@@ -52,6 +53,7 @@ __all__ = [
     "SpecialistDocuments",
     "SpecialistsApprovalData",
     "SpecialistsAuthInfo",
+    "SpecialistSpecializations",
     
     
     #Admin

@@ -21,6 +21,7 @@ from .base_model import Base, BaseModel
 
 class AppointmentStatusEnum(enum.Enum):
     """Core appointment states"""
+    PENDING_APPROVAL = "pending_approval"
     SCHEDULED = "scheduled"
     CONFIRMED = "confirmed"
     COMPLETED = "completed"
@@ -64,8 +65,8 @@ class Appointment(Base, BaseModel):
     patient = relationship("Patient", back_populates="appointments")  
     
     # Core appointment fields
-    scheduled_start = Column(DateTime(timezone=True), nullable=False)
-    scheduled_end = Column(DateTime(timezone=True), nullable=False)
+    scheduled_start = Column(DateTime(timezone=True), nullable=True)  # Nullable for pending approval
+    scheduled_end = Column(DateTime(timezone=True), nullable=True)   # Nullable for pending approval
     appointment_type = Column(Enum(AppointmentTypeEnum), nullable=False, default=AppointmentTypeEnum.VIRTUAL)
     status = Column(Enum(AppointmentStatusEnum), nullable=False, default=AppointmentStatusEnum.SCHEDULED)
     
@@ -80,7 +81,7 @@ class Appointment(Base, BaseModel):
     
     # Constraints and Indexes
     __table_args__ = (
-        CheckConstraint('scheduled_end > scheduled_start', name='check_end_after_start'),
+        CheckConstraint('(scheduled_start IS NULL AND scheduled_end IS NULL) OR (scheduled_end > scheduled_start)', name='check_end_after_start'),
         CheckConstraint('fee >= 0', name='non_negative_fee'),
         Index('idx_appointment_specialist', 'specialist_id'),
         Index('idx_appointment_patient', 'patient_id'),
@@ -97,7 +98,7 @@ class Appointment(Base, BaseModel):
     @validates('scheduled_start', 'scheduled_end')
     def validate_future_date(self, key, value):
         """Validate that appointment is scheduled in the future"""
-        if value < datetime.now():
+        if value is not None and value < datetime.now():
             raise ValueError("Appointment must be scheduled in the future")
         return value
     
@@ -109,6 +110,7 @@ class Appointment(Base, BaseModel):
     def is_active(self) -> bool:
         """Check if appointment is active"""
         return self.status in [
+            AppointmentStatusEnum.PENDING_APPROVAL,
             AppointmentStatusEnum.SCHEDULED,
             AppointmentStatusEnum.CONFIRMED
         ]

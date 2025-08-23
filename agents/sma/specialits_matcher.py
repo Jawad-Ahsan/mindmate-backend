@@ -56,10 +56,13 @@ class SpecialistMatcher:
             
             # Apply hard filters to get candidate specialists
             candidates = self._apply_hard_filters(prefs)
+            logger.info(f"Hard filters returned {len(candidates)} candidates")
             
             if not candidates:
+                logger.info("No candidates found with hard filters, trying relaxed filters")
                 # Try with relaxed filters
                 candidates = self._apply_relaxed_filters(prefs)
+                logger.info(f"Relaxed filters returned {len(candidates)} candidates")
             
             # Score and rank specialists
             scored_specialists = self._score_specialists(candidates, prefs)
@@ -79,18 +82,21 @@ class SpecialistMatcher:
                 specialist_data = self._convert_to_basic_info(specialist)
                 specialists_data.append(specialist_data)
             
-            return {
+            result = {
                 "specialists": specialists_data,
                 "total_count": total_count,
                 "page": request.page,
                 "size": request.size,
-                "has_more": end_idx < total_count,
+                "total_pages": (total_count + request.size - 1) // request.size,
                 "search_criteria": {
                     "applied_filters": prefs.dict(),
                     "total_candidates": len(candidates),
                     "scoring_weights": self.weights
                 }
             }
+            
+            logger.info(f"Final search result: {len(specialists_data)} specialists, total count: {total_count}")
+            return result
             
         except Exception as e:
             logger.error(f"Error in specialist search: {str(e)}")
@@ -198,10 +204,10 @@ class SpecialistMatcher:
             Specialists.is_deleted == False
         )
         
-        # Availability status filter
-        query = query.filter(
-            Specialists.availability_status == AvailabilityStatusEnum.ACCEPTING_NEW_PATIENTS
-        )
+        # Availability status filter - temporarily commented out for testing
+        # query = query.filter(
+        #     Specialists.availability_status == AvailabilityStatusEnum.ACCEPTING_NEW_PATIENTS
+        # )
         
         # Consultation mode filter
         if prefs.consultation_mode:
@@ -249,7 +255,11 @@ class SpecialistMatcher:
         
         try:
             # Use distinct on id to avoid JSON field comparison issues
-            return query.distinct(Specialists.id).all()
+            specialists = query.distinct(Specialists.id).all()
+            logger.info(f"Found {len(specialists)} specialists after hard filters")
+            for spec in specialists:
+                logger.info(f"Specialist: {spec.id}, approval: {spec.approval_status}, verified: {spec.auth_info.email_verification_status if spec.auth_info else 'No auth info'}")
+            return specialists
         except Exception as e:
             logger.warning(f"Distinct on id failed, trying alternative approach: {str(e)}")
             # Fallback: use a subquery approach to avoid JSON field issues
@@ -532,20 +542,20 @@ class SpecialistMatcher:
         return {
             "id": specialist.id,
             "full_name": specialist.full_name,
-            "specialist_type": specialist.specialist_type.value,
+            "specialist_type": specialist.specialist_type.value if specialist.specialist_type else "Not Specified",
             "years_experience": specialist.years_experience,
             "bio": specialist.bio,
             "consultation_fee": float(specialist.consultation_fee) if specialist.consultation_fee else None,
             "languages_spoken": specialist.languages_spoken or ["English", "Urdu"],
-            "specializations": [spec.specialization.value for spec in specialist.specializations],
+            "specializations": [spec.specialization.value for spec in specialist.specializations] if specialist.specializations else [],
             "city": specialist.city,
             "clinic_name": specialist.clinic_name,
             "profile_image_url": specialist.profile_image_url,
             "website_url": specialist.website_url,
-            "availability_status": specialist.availability_status.value,
+            "availability_status": specialist.availability_status.value if specialist.availability_status else "Not Specified",
             "average_rating": float(specialist.average_rating) if specialist.average_rating else 0.0,
             "total_reviews": specialist.total_reviews,
             "total_appointments": specialist.total_appointments,
-            "is_verified": specialist.is_approved,
+            "is_approved": specialist.is_approved,
             "can_practice": specialist.can_practice
         }

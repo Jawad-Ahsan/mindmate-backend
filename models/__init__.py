@@ -15,6 +15,7 @@ from .sql_models import (
     SpecialistDocuments,
     SpecialistsApprovalData,
     SpecialistsAuthInfo,
+    SpecialistSpecializations,
     
     Admin,
     AdminCreate,
@@ -56,6 +57,7 @@ __all__ = [
     "SpecialistDocuments",
     "SpecialistsApprovalData",
     "SpecialistsAuthInfo",
+    "SpecialistSpecializations",
     
     
     #Admin

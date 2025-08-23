@@ -14,7 +14,7 @@ import uuid
 from .specialits_matcher import SpecialistMatcher
 from .appointments_manager import AppointmentsManager
 from .sma_schemas import (
-    SpecialistSearchRequest, BookAppointmentRequest, CancelAppointmentRequest, 
+    SpecialistSearchRequest, BookAppointmentRequest, RequestAppointmentRequest, CancelAppointmentRequest, 
     RescheduleAppointmentRequest, UpdateAppointmentStatusRequest, 
     CancelAppointmentBySpecialistRequest, SpecialistDetailedInfo, 
     AppointmentStatus, ConsultationMode, SpecialistBasicInfo, AppointmentInfo,
@@ -107,6 +107,67 @@ class SMA:
             logger.error(f"Error getting specialist public profile: {str(e)}")
             raise
     
+    def request_appointment(self, patient_id: uuid.UUID, request: RequestAppointmentRequest) -> Dict[str, Any]:
+        """
+        Request appointment with specific specialist (requires approval)
+        
+        Args:
+            patient_id: Patient UUID
+            request: Appointment request
+            
+        Returns:
+            Request details with pending approval status
+        """
+        try:
+            logger.info(f"Patient {patient_id} requesting appointment with specialist {request.specialist_id}")
+            
+            # Check if specialist exists and is approved
+            specialist = self.db.query(Specialists).filter(
+                Specialists.id == request.specialist_id,
+                Specialists.is_deleted == False,
+                Specialists.approval_status == "approved"
+            ).first()
+            
+            if not specialist:
+                raise ValueError("Specialist not found or not approved")
+            
+            # Create appointment request (no specific time, just consultation mode)
+            appointment = Appointment(
+                specialist_id=request.specialist_id,
+                patient_id=patient_id,
+                scheduled_start=None,  # Will be set when specialist confirms
+                scheduled_end=None,    # Will be set when specialist confirms
+                appointment_type=AppointmentTypeEnum.VIRTUAL if request.consultation_mode == ConsultationMode.ONLINE else AppointmentTypeEnum.IN_PERSON,
+                status=AppointmentStatusEnum.PENDING_APPROVAL,
+                fee=specialist.consultation_fee or 0,
+                notes=request.notes
+            )
+            
+            self.db.add(appointment)
+            self.db.commit()
+            self.db.refresh(appointment)
+            
+            # Send notification to specialist
+            self._send_appointment_notification_to_specialist(appointment, "new_request")
+            
+            result = {
+                "appointment_id": appointment.id,
+                "specialist_id": appointment.specialist_id,
+                "patient_id": appointment.patient_id,
+                "consultation_mode": request.consultation_mode,
+                "status": "pending_approval",
+                "notes": request.notes,
+                "message": "Appointment request sent successfully. Awaiting specialist approval."
+            }
+            
+            logger.info(f"Appointment request created successfully: {appointment.id}")
+            return result
+            
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"Error requesting appointment: {str(e)}")
+            raise
+
     def book_appointment(self, patient_id: uuid.UUID, request: BookAppointmentRequest) -> Dict[str, Any]:
         """
         Book appointment with specific specialist
@@ -124,7 +185,6 @@ class SMA:
             # Check if specialist exists and is approved
             specialist = self.db.query(Specialists).filter(
                 Specialists.id == request.specialist_id,
-                Specialists.is_deleted == False,
                 Specialists.approval_status == "approved"
             ).first()
             
@@ -134,8 +194,8 @@ class SMA:
             # Check if slot is available
             if not self.appointments_manager.is_slot_available(
                 specialist_id=request.specialist_id,
-                start_time=request.scheduled_start,
-                end_time=request.scheduled_end
+                start_time=request.start_time,
+                end_time=request.end_time
             ):
                 raise ValueError("Selected time slot is not available")
             
@@ -143,12 +203,12 @@ class SMA:
             appointment = Appointment(
                 specialist_id=request.specialist_id,
                 patient_id=patient_id,
-                scheduled_start=request.scheduled_start,
-                scheduled_end=request.scheduled_end,
+                scheduled_start=request.start_time,
+                scheduled_end=request.end_time,
                 appointment_type=AppointmentTypeEnum.VIRTUAL if request.consultation_mode == ConsultationMode.ONLINE else AppointmentTypeEnum.IN_PERSON,
                 status=AppointmentStatusEnum.SCHEDULED,
                 fee=specialist.consultation_fee or 0,
-                notes=request.notes
+                    notes=request.notes
             )
             
             self.db.add(appointment)
@@ -340,6 +400,73 @@ class SMA:
     # SPECIALIST ENDPOINTS
     # ============================================================================
     
+    def get_patient_appointments(self, patient_id: uuid.UUID, page: int = 1, size: int = 20, status_filter: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get appointments for patient
+        
+        Args:
+            patient_id: Patient UUID
+            page: Page number
+            size: Results per page
+            status_filter: Optional status filter
+            
+        Returns:
+            Paginated list of appointments
+        """
+        try:
+            logger.info(f"Getting appointments for patient {patient_id}")
+            
+            # Query appointments
+            query = self.db.query(Appointment).filter(
+                Appointment.patient_id == patient_id
+            )
+            
+            # Apply status filter if provided
+            if status_filter:
+                query = query.filter(Appointment.status == AppointmentStatusEnum(status_filter))
+            
+            # Order by creation date (newest first)
+            query = query.order_by(Appointment.created_at.desc())
+            
+            # Pagination
+            total_count = query.count()
+            appointments = query.offset((page - 1) * size).limit(size).all()
+            
+            # Format appointments
+            appointment_list = []
+            for apt in appointments:
+                # Get specialist info
+                specialist = self.db.query(Specialists).filter(Specialists.id == apt.specialist_id).first()
+                
+                appointment_list.append({
+                    "id": apt.id,
+                    "specialist_id": apt.specialist_id,
+                    "specialist_name": f"{specialist.first_name} {specialist.last_name}" if specialist else "Unknown",
+                    "scheduled_start": apt.scheduled_start,
+                    "scheduled_end": apt.scheduled_end,
+                    "consultation_mode": "online" if apt.appointment_type == AppointmentTypeEnum.VIRTUAL else "in_person",
+                    "fee": float(apt.fee),
+                    "status": apt.status.value,
+                    "notes": apt.notes,
+                    "created_at": apt.created_at,
+                    "updated_at": apt.updated_at
+                })
+            
+            result = {
+                "appointments": appointment_list,
+                "total_count": total_count,
+                "page": page,
+                "size": size,
+                "total_pages": (total_count + size - 1) // size
+            }
+            
+            logger.info(f"Found {total_count} appointments for patient {patient_id}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error getting patient appointments: {str(e)}")
+            raise
+
     def get_booked_appointments(self, specialist_id: uuid.UUID, page: int = 1, size: int = 20) -> Dict[str, Any]:
         """
         Get booked appointments for specialist
@@ -359,6 +486,7 @@ class SMA:
             query = self.db.query(Appointment).filter(
                 Appointment.specialist_id == specialist_id,
                 Appointment.status.in_([
+                    AppointmentStatusEnum.PENDING_APPROVAL,
                     AppointmentStatusEnum.SCHEDULED,
                     AppointmentStatusEnum.CONFIRMED,
                     AppointmentStatusEnum.COMPLETED
@@ -386,7 +514,8 @@ class SMA:
                     "status": apt.status.value,
                     "notes": apt.notes,
                     "created_at": apt.created_at,
-                    "updated_at": apt.updated_at
+                    "updated_at": apt.updated_at,
+                    "is_pending_approval": apt.status == AppointmentStatusEnum.PENDING_APPROVAL
                 })
             
             result = {
@@ -431,6 +560,17 @@ class SMA:
             appointment.notes = f"{appointment.notes or ''}\n\nSpecialist notes: {request.notes}"
             appointment.updated_at = datetime.now(timezone.utc)
             
+            # If confirming a pending appointment, set scheduled time (optional)
+            if request.status == "confirmed" and appointment.status == AppointmentStatusEnum.PENDING_APPROVAL:
+                # For now, we'll set a default time 24 hours from now
+                # In a real implementation, the specialist would specify the time
+                from datetime import timedelta
+                default_start = datetime.now(timezone.utc) + timedelta(hours=24)
+                default_end = default_start + timedelta(hours=1)
+                appointment.scheduled_start = default_start
+                appointment.scheduled_end = default_end
+                appointment.notes = f"{appointment.notes}\n\nAppointment scheduled for {default_start.strftime('%Y-%m-%d %H:%M')}"
+            
             self.db.commit()
             
             # Send notification to patient
@@ -470,7 +610,7 @@ class SMA:
             appointment = self.db.query(Appointment).filter(
                 Appointment.id == request.appointment_id,
                 Appointment.specialist_id == specialist_id,
-                Appointment.status.in_([AppointmentStatusEnum.SCHEDULED, AppointmentStatusEnum.CONFIRMED])
+                Appointment.status.in_([AppointmentStatusEnum.PENDING_APPROVAL, AppointmentStatusEnum.SCHEDULED, AppointmentStatusEnum.CONFIRMED])
             ).first()
             
             if not appointment:
@@ -632,10 +772,17 @@ class SMA:
             patient_name = f"{patient.first_name} {patient.last_name}" if patient else "Patient"
             
             subject = f"Appointment Update - {notification_type.replace('_', ' ').title()}"
+            
+            # Handle different appointment types
+            if appointment.scheduled_start:
+                date_info = f"<p><strong>Date:</strong> {appointment.scheduled_start.strftime('%B %d, %Y at %I:%M %p')}</p>"
+            else:
+                date_info = "<p><strong>Date:</strong> Pending approval (no scheduled time yet)</p>"
+            
             message = f"""
             <h3>Appointment Update</h3>
             <p><strong>Patient:</strong> {patient_name}</p>
-            <p><strong>Date:</strong> {appointment.scheduled_start.strftime('%B %d, %Y at %I:%M %p')}</p>
+            {date_info}
             <p><strong>Status:</strong> {appointment.status.value}</p>
             """
             
@@ -657,10 +804,17 @@ class SMA:
             specialist_name = f"Dr. {specialist.first_name} {specialist.last_name}" if specialist else "Specialist"
             
             subject = f"Appointment Update - {notification_type.replace('_', ' ').title()}"
+            
+            # Handle different appointment types
+            if appointment.scheduled_start:
+                date_info = f"<p><strong>Date:</strong> {appointment.scheduled_start.strftime('%B %d, %Y at %I:%M %p')}</p>"
+            else:
+                date_info = "<p><strong>Date:</strong> Pending approval (no scheduled time yet)</p>"
+            
             message = f"""
             <h3>Appointment Update</h3>
             <p><strong>Specialist:</strong> {specialist_name}</p>
-            <p><strong>Date:</strong> {appointment.scheduled_start.strftime('%B %d, %Y at %I:%M %p')}</p>
+            {date_info}
             <p><strong>Status:</strong> {appointment.status.value}</p>
             """
             

@@ -1,273 +1,240 @@
-"""
-SMA Schemas - Pydantic Models for Specialist Matching Agent
-==========================================================
-Request/Response schemas for specialist search, matching, and appointment booking
-"""
-
-from pydantic import BaseModel, Field, validator
-from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
-from enum import Enum
+from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Any
+from datetime import datetime
 import uuid
-
-# ============================================================================
-# ENUMERATIONS
-# ============================================================================
+from enum import Enum
 
 class ConsultationMode(str, Enum):
-    """Consultation delivery methods"""
     ONLINE = "online"
     IN_PERSON = "in_person"
     HYBRID = "hybrid"
 
 class SortOption(str, Enum):
-    """Sort options for specialist search"""
     BEST_MATCH = "best_match"
-    FEE_LOW = "fee_low"
-    FEE_HIGH = "fee_high"
     RATING_HIGH = "rating_high"
+    FEE_LOW = "fee_low"
     EXPERIENCE_HIGH = "experience_high"
-    AVAILABILITY_SOON = "availability_soon"
+
+class SlotStatus(str, Enum):
+    AVAILABLE = "available"
+    BOOKED = "booked"
+    HELD = "held"
+    EXPIRED = "expired"
 
 class AppointmentStatus(str, Enum):
-    """Appointment status"""
-    REQUESTED = "requested"
+    PENDING_APPROVAL = "pending_approval"
+    SCHEDULED = "scheduled"
     CONFIRMED = "confirmed"
-    CANCELLED_BY_PATIENT = "cancelled_by_patient"
-    CANCELLED_BY_SPECIALIST = "cancelled_by_specialist"
     COMPLETED = "completed"
+    CANCELLED = "cancelled"
     NO_SHOW = "no_show"
 
-# ============================================================================
-# PATIENT ENDPOINTS - REQUEST SCHEMAS
-# ============================================================================
+# Request Models
+class DefaultPreferences(BaseModel):
+    consultation_mode: ConsultationMode = ConsultationMode.ONLINE
+    languages: List[str] = ["English"]
+    specializations: List[str] = []
+    budget_max: Optional[float] = None
+    city: Optional[str] = None
+    sort_by: SortOption = SortOption.BEST_MATCH
+    specialist_type: Optional[str] = None
 
 class SpecialistSearchRequest(BaseModel):
-    """Request schema for specialist search by patients"""
-    
-    # Search parameters
-    query: Optional[str] = Field(None, description="Free text search query")
-    specialist_type: Optional[str] = Field(None, description="Type of specialist")
-    consultation_mode: Optional[ConsultationMode] = Field(None, description="Preferred consultation mode")
-    city: Optional[str] = Field(None, description="City for in-person consultations")
-    languages: Optional[List[str]] = Field(None, description="Preferred languages")
-    specializations: Optional[List[str]] = Field(None, description="Required specializations")
-    budget_max: Optional[float] = Field(None, ge=0, description="Maximum budget in PKR")
-    
-    # Sorting and pagination
-    sort_by: SortOption = Field(SortOption.BEST_MATCH, description="Sort order")
-    page: int = Field(1, ge=1, description="Page number")
-    size: int = Field(20, ge=1, le=100, description="Results per page")
-    
-    # Availability constraints
-    available_from: Optional[datetime] = Field(None, description="Earliest available date")
-    available_to: Optional[datetime] = Field(None, description="Latest available date")
+    query: Optional[str] = None
+    specialist_type: Optional[str] = None
+    consultation_mode: Optional[ConsultationMode] = ConsultationMode.ONLINE
+    languages: Optional[List[str]] = None
+    specializations: Optional[List[str]] = None
+    budget_max: Optional[float] = None
+    city: Optional[str] = None
+    sort_by: Optional[SortOption] = SortOption.BEST_MATCH
+    available_from: Optional[datetime] = None
+    available_to: Optional[datetime] = None
+    page: int = 1
+    size: int = 20
+
+class TopSpecialistsRequest(BaseModel):
+    consultation_mode: Optional[ConsultationMode] = ConsultationMode.ONLINE
+    specializations: Optional[List[str]] = None
+    city: Optional[str] = None
+    limit: int = 5
+
+class SlotHoldRequest(BaseModel):
+    specialist_id: uuid.UUID
+    start_time: datetime
+    end_time: datetime
+    consultation_mode: ConsultationMode
+
+class AppointmentConfirmRequest(BaseModel):
+    slot_hold_id: uuid.UUID
+    patient_id: uuid.UUID
+    notes: Optional[str] = None
+
+class AppointmentCancelRequest(BaseModel):
+    appointment_id: uuid.UUID
+    reason: Optional[str] = None
+
+class AppointmentRescheduleRequest(BaseModel):
+    appointment_id: uuid.UUID
+    new_start_time: datetime
+    new_end_time: datetime
+    reason: Optional[str] = None
 
 class BookAppointmentRequest(BaseModel):
-    """Request schema for booking appointment"""
-    
-    specialist_id: uuid.UUID = Field(..., description="Specialist ID")
-    scheduled_start: datetime = Field(..., description="Appointment start time")
-    scheduled_end: datetime = Field(..., description="Appointment end time")
-    consultation_mode: ConsultationMode = Field(..., description="Consultation mode")
-    notes: Optional[str] = Field(None, description="Patient notes")
+    specialist_id: uuid.UUID
+    start_time: datetime
+    end_time: datetime
+    consultation_mode: ConsultationMode
+    notes: Optional[str] = None
+
+class RequestAppointmentRequest(BaseModel):
+    specialist_id: uuid.UUID
+    consultation_mode: ConsultationMode
+    notes: Optional[str] = None
 
 class CancelAppointmentRequest(BaseModel):
-    """Request schema for cancelling appointment"""
-    
-    appointment_id: uuid.UUID = Field(..., description="Appointment ID")
-    reason: Optional[str] = Field(None, description="Cancellation reason")
+    appointment_id: uuid.UUID
+    reason: Optional[str] = None
 
 class RescheduleAppointmentRequest(BaseModel):
-    """Request schema for rescheduling appointment"""
-    
-    appointment_id: uuid.UUID = Field(..., description="Appointment ID")
-    new_scheduled_start: datetime = Field(..., description="New appointment start time")
-    new_scheduled_end: datetime = Field(..., description="New appointment end time")
-    reason: Optional[str] = Field(None, description="Reschedule reason")
-
-# ============================================================================
-# SPECIALIST ENDPOINTS - REQUEST SCHEMAS
-# ============================================================================
+    appointment_id: uuid.UUID
+    new_start_time: datetime
+    new_end_time: datetime
+    reason: Optional[str] = None
 
 class UpdateAppointmentStatusRequest(BaseModel):
-    """Request schema for updating appointment status"""
-    
-    appointment_id: uuid.UUID = Field(..., description="Appointment ID")
-    status: AppointmentStatus = Field(..., description="New appointment status")
-    notes: Optional[str] = Field(None, description="Specialist notes")
+    appointment_id: uuid.UUID
+    status: AppointmentStatus
+    notes: Optional[str] = None
 
 class CancelAppointmentBySpecialistRequest(BaseModel):
-    """Request schema for specialist cancelling appointment"""
-    
-    appointment_id: uuid.UUID = Field(..., description="Appointment ID")
-    reason: Optional[str] = Field(None, description="Cancellation reason")
-
-# ============================================================================
-# RESPONSE SCHEMAS
-# ============================================================================
-
-class SpecialistBasicInfo(BaseModel):
-    """Basic specialist information for search results"""
-    
-    id: uuid.UUID
-    name: str
-    type: str
-    rating: float
-    specializations: List[str]
-    fee: float
-    languages: List[str]
-    city: Optional[str]
-    consultation_mode: ConsultationMode
-    match_score: Optional[float]
-    
-    class Config:
-        from_attributes = True
+    appointment_id: uuid.UUID
+    reason: Optional[str] = None
 
 class SpecialistDetailedInfo(BaseModel):
-    """Detailed specialist information for public profile"""
-    
     id: uuid.UUID
-    name: str
-    type: str
-    rating: float
+    full_name: str
+    specialist_type: str
+    years_experience: int
+    city: str
+    average_rating: float
+    consultation_fee: float
     specializations: List[str]
-    fee: float
     languages: List[str]
-    city: Optional[str]
     consultation_mode: ConsultationMode
-    bio: str
-    experience_years: int
-    certifications: List[str]
-    education: List[str]
-    availability_slots: List[Dict[str, Any]]
-    
-    class Config:
-        from_attributes = True
+    bio: Optional[str] = None
+    education: Optional[str] = None
+    certifications: Optional[str] = None
 
-class AppointmentInfo(BaseModel):
-    """Appointment information"""
-    
+class SpecialistBasicInfo(BaseModel):
     id: uuid.UUID
-    patient_id: uuid.UUID
-    specialist_id: uuid.UUID
-    scheduled_start: datetime
-    scheduled_end: datetime
-    consultation_mode: ConsultationMode
-    fee: float
-    status: AppointmentStatus
-    notes: Optional[str]
-    created_at: datetime
-    updated_at: datetime
-    cancelled_at: Optional[datetime]
-    
-    class Config:
-        from_attributes = True
+    full_name: str
+    specialist_type: str
+    years_experience: int
+    city: str
+    average_rating: float
+    consultation_fee: float
+    specializations: List[str]
+    languages: List[str]
 
 class PatientPublicProfile(BaseModel):
-    """Patient public profile for specialists"""
-    
     id: uuid.UUID
-    first_name: str
-    last_name: str
-    age: Optional[int]
-    gender: Optional[str]
-    city: Optional[str]
-    consultation_history: List[Dict[str, Any]]
-    
-    class Config:
-        from_attributes = True
+    full_name: str
+    age: Optional[int] = None
+    city: str
+    risk_level: Optional[str] = None
 
 class PatientReportInfo(BaseModel):
-    """Patient report information from PIMA"""
-    
     patient_id: uuid.UUID
-    report_available: bool
-    report_generated_at: Optional[datetime]
-    report_type: Optional[str]
-    report_summary: Optional[str]
-    risk_level: Optional[str]
-    recommendations: Optional[List[str]]
-    generated_by: Optional[str]
-
-# ============================================================================
-# RESPONSE SCHEMAS
-# ============================================================================
-
-class SpecialistSearchResponse(BaseModel):
-    """Response schema for specialist search"""
-    
-    specialists: List[SpecialistBasicInfo]
-    total_count: int
-    page: int
-    size: int
-    has_more: bool
-    search_criteria: Dict[str, Any]
+    report_type: str
+    report_data: Dict[str, Any]
+    generated_at: datetime
 
 class SpecialistProfileResponse(BaseModel):
-    """Response schema for specialist public profile"""
-    
     specialist: SpecialistDetailedInfo
-    message: str
+    availability: List[Dict[str, Any]]
+    reviews: List[Dict[str, Any]]
 
 class AppointmentResponse(BaseModel):
-    """Response schema for appointment operations"""
-    
-    appointment: AppointmentInfo
-    message: str
-
-class AppointmentListResponse(BaseModel):
-    """Response schema for appointment list"""
-    
-    appointments: List[AppointmentInfo]
-    total_count: int
-    page: int
-    size: int
-    has_more: bool
+    appointment: "AppointmentInfo"
+    specialist_info: SpecialistBasicInfo
+    patient_info: PatientPublicProfile
 
 class PatientProfileResponse(BaseModel):
-    """Response schema for patient public profile"""
-    
     patient: PatientPublicProfile
-    message: str
+    medical_history: Optional[Dict[str, Any]] = None
 
 class PatientReportResponse(BaseModel):
-    """Response schema for patient report"""
-    
     report: PatientReportInfo
-    message: str
-
-# ============================================================================
-# ERROR SCHEMAS
-# ============================================================================
+    specialist_notes: Optional[str] = None
 
 class SMAError(BaseModel):
-    """Standard error response"""
-    
     error: str
     message: str
     details: Optional[Dict[str, Any]] = None
-    timestamp: datetime = Field(default_factory=datetime.now)
 
-# ============================================================================
-# UTILITY SCHEMAS
-# ============================================================================
+# Response Models
+class SpecialistSearchResponse(BaseModel):
+    specialists: List[Dict[str, Any]]
+    total_count: int
+    page: int
+    size: int
+    total_pages: int
 
-class DefaultPreferences(BaseModel):
-    """Default preferences when user doesn't specify"""
-    
-    consultation_mode: ConsultationMode = ConsultationMode.ONLINE
-    languages: List[str] = ["English", "Urdu"]
-    budget_max: Optional[float] = None
-    city: Optional[str] = None
-    specialist_type: Optional[str] = None
-    specializations: Optional[List[str]] = None
+class TopSpecialistsResponse(BaseModel):
+    specialists: List[Dict[str, Any]]
+    total_count: int
+
+class SlotHoldResponse(BaseModel):
+    slot_hold_id: uuid.UUID
+    specialist_id: uuid.UUID
+    start_time: datetime
+    end_time: datetime
+    consultation_mode: ConsultationMode
+    expires_at: datetime
+
+class AppointmentConfirmResponse(BaseModel):
+    appointment_id: uuid.UUID
+    specialist_id: uuid.UUID
+    patient_id: uuid.UUID
+    start_time: datetime
+    end_time: datetime
+    consultation_mode: ConsultationMode
+    status: AppointmentStatus
+    fee: float
+
+class RequestAppointmentResponse(BaseModel):
+    appointment_id: uuid.UUID
+    specialist_id: uuid.UUID
+    patient_id: uuid.UUID
+    consultation_mode: ConsultationMode
+    status: AppointmentStatus
+    notes: Optional[str] = None
+    message: str
+
+class AppointmentListResponse(BaseModel):
+    appointments: List[Dict[str, Any]]
+    total_count: int
+    page: int
+    size: int
+    total_pages: int
+
+class AppointmentInfo(BaseModel):
+    id: uuid.UUID
+    specialist_id: uuid.UUID
+    patient_id: uuid.UUID
+    scheduled_start: datetime
+    scheduled_end: datetime
+    consultation_mode: ConsultationMode
+    status: AppointmentStatus
+    fee: float
+    notes: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
 
 class HealthCheckResponse(BaseModel):
-    """Health check response"""
-    
     status: str
-    service: str
     timestamp: datetime
-    version: str = "1.0.0"
-    message: str
+    version: str
+    database: str
+    redis: str

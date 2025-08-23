@@ -510,11 +510,17 @@ async def login_user(
                 # Check profile completeness (basic check)
                 profile_complete = bool(
                     authenticated_user.phone and 
-                    authenticated_user.address and
-                    authenticated_user.emergency_contact
+                    authenticated_user.city and
+                    authenticated_user.district
                 )
                 
-                return PatientLoginResponse(
+                print(f"DEBUG: Creating patient login response")
+                print(f"DEBUG: Patient ID: {authenticated_user.id}")
+                print(f"DEBUG: Patient email: {authenticated_user.email}")
+                print(f"DEBUG: Patient full_name: {full_name}")
+                print(f"DEBUG: Profile complete: {profile_complete}")
+                
+                response = PatientLoginResponse(
                     access_token=access_token,
                     refresh_token=refresh_token,
                     user_id=str(authenticated_user.id),
@@ -524,6 +530,9 @@ async def login_user(
                     verification_status="verified",
                     has_active_appointments=False  # TODO: Check actual appointments
                 )
+                
+                print(f"DEBUG: Patient response created: {response}")
+                return response
             
             elif user_type == "specialist":
                 print(f"DEBUG: Creating specialist login response for ID: {authenticated_user.id}")
