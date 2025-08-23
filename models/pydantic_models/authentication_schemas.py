@@ -113,24 +113,12 @@ class PatientLoginResponse(LoginResponse):
 # ============================================================================
 
 class SpecialistRegisterRequest(BaseAuthModel):
-    """Specialist registration request - minimum required fields"""
-    # Personal Information
+    """Specialist registration request - minimum required fields for new simplified flow"""
+    # Personal Information - only basic fields required
     first_name: str = Field(min_length=2, max_length=100)
     last_name: str = Field(min_length=2, max_length=100)
     email: EmailStr
     password: str = Field(min_length=8)
-    phone: str = Field(min_length=10, max_length=20)
-    
-    # Required demographic info
-    gender: SpecialistGenderEnum
-    city: str = Field(min_length=2, max_length=100)
-    
-    # Professional Information
-    specialist_type: SpecialistTypeEnum
-    years_experience: int = Field(ge=0, le=60)
-    
-    # License Information (minimum for approval)
-    license_number: str = Field(min_length=3, max_length=100)
     
     # Terms acceptance
     accepts_terms_and_conditions: bool = True
@@ -140,14 +128,6 @@ class SpecialistRegisterRequest(BaseAuthModel):
     def validate_password(cls, v: str) -> str:
         if len(v) < 8:
             raise ValueError('Password must be at least 8 characters')
-        return v
-    
-    @field_validator('phone')
-    @classmethod
-    def validate_phone(cls, v: str) -> str:
-        # Pakistani phone number format
-        if not re.match(r'^\+?92[0-9]{10}$', v.replace(' ', '').replace('-', '')):
-            raise ValueError('Phone must be in Pakistani format: +92XXXXXXXXXX')
         return v
     
     @field_validator('accepts_terms_and_conditions')

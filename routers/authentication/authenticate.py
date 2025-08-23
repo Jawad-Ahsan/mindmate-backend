@@ -217,10 +217,15 @@ def authenticate_patient(db: Session, email: str, password: str) -> tuple:
 def authenticate_specialist(db: Session, email: str, password: str) -> tuple:
     """Authenticate specialist and return specialist, auth_info tuple or raise specific error"""
     try:
+        print(f"DEBUG: Specialist authentication attempt for email: {email}")
         specialist = db.query(Specialists).filter(
             Specialists.email == email.lower(),
             Specialists.is_deleted == False
         ).first()
+        
+        print(f"DEBUG: Specialist found: {specialist is not None}")
+        if specialist:
+            print(f"DEBUG: Specialist ID: {specialist.id}, Approval status: {specialist.approval_status}")
         
         if not specialist:
             raise HTTPException(
@@ -232,22 +237,34 @@ def authenticate_specialist(db: Session, email: str, password: str) -> tuple:
             SpecialistsAuthInfo.specialist_id == specialist.id
         ).first()
         
+        print(f"DEBUG: Auth info found: {auth_info is not None}")
+        if auth_info:
+            print(f"DEBUG: Email verification status: {auth_info.email_verification_status}")
+            print(f"DEBUG: Has password: {auth_info.hashed_password is not None}")
+        
         if not auth_info:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Specialist authentication data not found. Please contact support."
             )
         
+        # MODIFIED: Allow login for verified specialists, even if profile is incomplete
+        print(f"DEBUG: Checking email verification status: {auth_info.email_verification_status}")
         if auth_info.email_verification_status != EmailVerificationStatusEnum.VERIFIED:
             verification_status = safe_enum_to_string(auth_info.email_verification_status)
+            print(f"DEBUG: Email verification failed. Status: {verification_status}")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Email verification required. Current status: {verification_status}. Please verify your email first."
             )
+        print(f"DEBUG: Email verification check passed")
         
         # MODIFIED: Only reject if explicitly REJECTED or SUSPENDED
         # Allow PENDING, UNDER_REVIEW, and APPROVED to login
+        print(f"DEBUG: Checking approval status: {specialist.approval_status}")
+        
         if specialist.approval_status == ApprovalStatusEnum.REJECTED:
+            print(f"DEBUG: Specialist rejected, blocking login")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Your specialist application has been rejected. Please contact support for more information."
@@ -255,20 +272,26 @@ def authenticate_specialist(db: Session, email: str, password: str) -> tuple:
         
         # Check if there's a SUSPENDED status (add this if your enum has it)
         if hasattr(ApprovalStatusEnum, 'SUSPENDED') and specialist.approval_status == ApprovalStatusEnum.SUSPENDED:
+            print(f"DEBUG: Specialist suspended, blocking login")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Your specialist account has been suspended. Please contact support."
             )
         
+        print(f"DEBUG: Approval status check passed: {specialist.approval_status}")
         # Allow login for PENDING, UNDER_REVIEW, and APPROVED statuses
         # The frontend will handle showing appropriate messages based on approval_status
         
+        print(f"DEBUG: Verifying password for specialist ID: {specialist.id}")
         if not verify_password(password, auth_info.hashed_password):
+            print(f"DEBUG: Password verification failed for specialist ID: {specialist.id}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid password. Please check your password and try again."
             )
         
+        print(f"DEBUG: Password verification successful for specialist ID: {specialist.id}")
+        print(f"DEBUG: Specialist authentication successful, returning specialist and auth_info")
         return specialist, auth_info
         
     except HTTPException:
@@ -396,18 +419,23 @@ async def login_user(
         auth_info = None
         
         try:
+            print(f"DEBUG: Attempting authentication for {email} as {user_type}")
             if user_type == "patient":
                 authenticated_user, auth_info = authenticate_patient(db, email, request.password)
+                print(f"DEBUG: Patient authentication successful")
                 
             elif user_type == "specialist":
                 authenticated_user, auth_info = authenticate_specialist(db, email, request.password)
+                print(f"DEBUG: Specialist authentication successful")
                 
             elif user_type == "admin":
                 authenticated_user = authenticate_admin(db, email, request.password, request.secret_key)
+                print(f"DEBUG: Admin authentication successful")
                 
         except HTTPException as auth_error:
             # Re-raise authentication errors with proper logging
-            print(f"Authentication failed for {email} as {user_type}: {auth_error.detail}")
+            print(f"DEBUG: Authentication failed for {email} as {user_type}: {auth_error.detail}")
+            print(f"DEBUG: HTTP status: {auth_error.status_code}")
             raise auth_error
         
         # This should not happen with our new authentication functions, but keep as safety
@@ -498,27 +526,42 @@ async def login_user(
                 )
             
             elif user_type == "specialist":
+                print(f"DEBUG: Creating specialist login response for ID: {authenticated_user.id}")
+                
                 # MODIFIED: Only approved AND verified specialists can practice
                 can_practice = (
                     authenticated_user.approval_status == ApprovalStatusEnum.APPROVED and
                     auth_info.email_verification_status == EmailVerificationStatusEnum.VERIFIED
                 )
+                print(f"DEBUG: Can practice: {can_practice} (approved: {authenticated_user.approval_status == ApprovalStatusEnum.APPROVED}, verified: {auth_info.email_verification_status == EmailVerificationStatusEnum.VERIFIED})")
                 
-                # Check profile completeness
+                # Check profile completeness - more comprehensive check
                 profile_complete = bool(
+                    authenticated_user.phone and
+                    authenticated_user.address and
                     authenticated_user.bio and
                     authenticated_user.consultation_fee and
-                    authenticated_user.address
+                    authenticated_user.languages_spoken and
+                    authenticated_user.specializations and
+                    len(authenticated_user.specializations) > 0
                 )
+                print(f"DEBUG: Profile complete: {profile_complete}")
+                print(f"DEBUG: Profile fields - phone: {bool(authenticated_user.phone)}, address: {bool(authenticated_user.address)}, bio: {bool(authenticated_user.bio)}, fee: {bool(authenticated_user.consultation_fee)}, languages: {bool(authenticated_user.languages_spoken)}, specializations: {len(authenticated_user.specializations) if authenticated_user.specializations else 0}")
                 
                 # MODIFIED: Add status messages for different approval states
                 status_message = None
                 if authenticated_user.approval_status == ApprovalStatusEnum.PENDING:
-                    status_message = "Your specialist application is pending admin approval. You can complete your profile and submit required documents while waiting."
+                    if not profile_complete:
+                        status_message = "Please complete your profile and submit required documents before admin approval."
+                    else:
+                        status_message = "Your specialist application is pending admin approval. We'll notify you once approved."
                 elif authenticated_user.approval_status == ApprovalStatusEnum.UNDER_REVIEW:
                     status_message = "Your application is currently under review by our team. We'll notify you once the review is complete."
                 elif authenticated_user.approval_status == ApprovalStatusEnum.APPROVED:
-                    status_message = "Your account has been approved! You can now start accepting appointments."
+                    if not profile_complete:
+                        status_message = "Your account is approved but profile is incomplete. Please complete your profile to start accepting appointments."
+                    else:
+                        status_message = "Your account has been approved! You can now start accepting appointments."
                 
                 return SpecialistLoginResponse(
                     access_token=access_token,
@@ -776,9 +819,13 @@ async def get_current_user(
                     "approval_status": safe_enum_to_string(getattr(user, 'approval_status', 'unknown')),
                     "last_login": auth_info.last_login if auth_info else None,
                     "profile_complete": bool(
+                        getattr(user, 'phone', None) and 
+                        getattr(user, 'address', None) and 
                         getattr(user, 'bio', None) and 
                         getattr(user, 'consultation_fee', None) and 
-                        getattr(user, 'address', None)
+                        getattr(user, 'languages_spoken', None) and 
+                        getattr(user, 'specializations', None) and 
+                        len(getattr(user, 'specializations', [])) > 0
                     )
                 })
             

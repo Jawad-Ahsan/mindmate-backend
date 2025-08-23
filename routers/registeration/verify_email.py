@@ -206,11 +206,18 @@ async def verify_patient_email(db: Session, email: str, otp: str) -> VerifyUserR
 async def verify_specialist_email(db: Session, email: str, otp: str) -> VerifyUserResponse:
     """Verify specialist email with OTP"""
     try:
+        print(f"DEBUG: Specialist email verification attempt for: {email}")
+        print(f"DEBUG: Received OTP: {otp}")
+        
         # Find specialist by email
         specialist = db.query(Specialists).filter(
             Specialists.email == email,
             Specialists.is_deleted == False
         ).first()
+        
+        print(f"DEBUG: Specialist found: {specialist is not None}")
+        if specialist:
+            print(f"DEBUG: Specialist ID: {specialist.id}, Name: {specialist.full_name}")
         
         if not specialist:
             raise HTTPException(
@@ -222,6 +229,12 @@ async def verify_specialist_email(db: Session, email: str, otp: str) -> VerifyUs
         auth_info = db.query(SpecialistsAuthInfo).filter(
             SpecialistsAuthInfo.specialist_id == specialist.id
         ).first()
+        
+        print(f"DEBUG: Auth info found: {auth_info is not None}")
+        if auth_info:
+            print(f"DEBUG: Current verification status: {auth_info.email_verification_status}")
+            print(f"DEBUG: Stored OTP: {auth_info.otp_code}")
+            print(f"DEBUG: OTP expires at: {auth_info.otp_expires_at}")
         
         if not auth_info:
             raise HTTPException(
@@ -254,15 +267,20 @@ async def verify_specialist_email(db: Session, email: str, otp: str) -> VerifyUs
             )
         
         # Mark as verified
+        print(f"DEBUG: Marking email as verified for specialist ID: {specialist.id}")
         auth_info.email_verification_status = EmailVerificationStatusEnum.VERIFIED
         auth_info.otp_code = None  # Clear OTP after successful verification
         auth_info.otp_expires_at = None
         auth_info.email_verified_at = datetime.utcnow()
         
+        print(f"DEBUG: Committing verification changes to database")
         db.commit()
+        print(f"DEBUG: Database commit successful")
         
         # Complete registration (send completion email and notify admins)
+        print(f"DEBUG: Calling complete_specialist_registration_after_verification")
         complete_specialist_registration_after_verification(db, specialist)
+        print(f"DEBUG: Registration completion function called successfully")
         
         return VerifyUserResponse(
             success=True,

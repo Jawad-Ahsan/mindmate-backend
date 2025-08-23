@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.openapi.utils import get_openapi
+from fastapi.exceptions import RequestValidationError
 from starlette.middleware.sessions import SessionMiddleware
 from sqlalchemy.orm import Session
 
@@ -58,6 +59,28 @@ app = FastAPI(
         }
     ]
 )
+
+# Validation exception handler for better error messages
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Handle Pydantic validation errors and return user-friendly messages"""
+    logger.error(f"Validation error: {exc.errors()}")
+    
+    # Format validation errors into user-friendly messages
+    error_details = []
+    for error in exc.errors():
+        field = " -> ".join(str(loc) for loc in error["loc"])
+        message = error["msg"]
+        error_details.append(f"{field}: {message}")
+    
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": "Validation error",
+            "errors": error_details,
+            "raw_errors": exc.errors()
+        }
+    )
 
 # Custom OpenAPI schema for better Swagger UI integration
 def custom_openapi():

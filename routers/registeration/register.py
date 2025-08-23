@@ -218,34 +218,55 @@ def safe_send_completion_email(email: str, first_name: str, last_name: str,
                               specialization_enum=None, user_type: str = "patient") -> bool:
     """Safely send completion email with proper enum handling"""
     try:
+        print(f"DEBUG: safe_send_completion_email called for {user_type}: {email}")
+        print(f"DEBUG: Specialization enum: {specialization_enum}")
+        
         if user_type == "patient":
             return send_patient_registration_completion_email(email, first_name, last_name)
         elif user_type == "specialist":
-            # Pass the enum directly - email function will handle conversion using safe_enum_to_string
-            specialization_str = safe_enum_to_string(specialization_enum) if specialization_enum else "Specialist"
+            # Handle None specialist_type gracefully
+            if specialization_enum is None:
+                print(f"DEBUG: Specialist type is None, using default 'Specialist'")
+                specialization_str = "Specialist"
+            else:
+                # Pass the enum directly - email function will handle conversion using safe_enum_to_string
+                specialization_str = safe_enum_to_string(specialization_enum)
+                print(f"DEBUG: Converted specialization to string: {specialization_str}")
+            
             return send_specialist_registration_completion_email(
                 email, first_name, last_name, specialization_str
             )
         return False
     except Exception as e:
-        print(f"Completion email failed for {email}: {str(e)}")
+        print(f"DEBUG: Completion email failed for {email}: {str(e)}")
+        print(f"DEBUG: Error type: {type(e)}")
         return False
 
 def safe_notify_admins(db: Session, specialist_data: dict) -> bool:
     """Safely notify admins about new specialist registration"""
     try:
+        print(f"DEBUG: safe_notify_admins called with data: {specialist_data}")
         admin_emails = get_admin_emails_for_notifications(db)
         
         if not admin_emails:
-            print("No admin emails found for notifications")
+            print("DEBUG: No admin emails found for notifications")
             return False
         
         # Convert specialization enum to string safely
-        specialization_str = safe_enum_to_string(specialist_data.get('specialization', ''))
+        specialization = specialist_data.get('specialization')
+        print(f"DEBUG: Raw specialization value: {specialization}")
+        
+        if specialization is None:
+            print(f"DEBUG: Specialization is None, using default 'Specialist'")
+            specialization_str = "Specialist"
+        else:
+            specialization_str = safe_enum_to_string(specialization)
+            print(f"DEBUG: Converted specialization to string: {specialization_str}")
         
         success_count = 0
         for admin_email in admin_emails:
             try:
+                print(f"DEBUG: Notifying admin: {admin_email}")
                 if send_admin_specialist_registration_notification(
                     admin_email=admin_email,
                     specialist_email=specialist_data['email'],
@@ -255,13 +276,18 @@ def safe_notify_admins(db: Session, specialist_data: dict) -> bool:
                     registration_date=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 ):
                     success_count += 1
+                    print(f"DEBUG: Successfully notified admin: {admin_email}")
+                else:
+                    print(f"DEBUG: Failed to notify admin: {admin_email}")
             except Exception as e:
-                print(f"Failed to notify admin {admin_email}: {str(e)}")
+                print(f"DEBUG: Exception while notifying admin {admin_email}: {str(e)}")
                 continue
         
+        print(f"DEBUG: Admin notification result: {success_count}/{len(admin_emails)} successful")
         return success_count > 0
     except Exception as e:
-        print(f"Admin notification failed: {str(e)}")
+        print(f"DEBUG: Admin notification failed: {str(e)}")
+        print(f"DEBUG: Error type: {type(e)}")
         return False
 
 # ============================================================================
@@ -348,30 +374,46 @@ async def register_patient(
         preferences = create_default_patient_preferences(patient.id)
         db.add(preferences)
         
+        # Validate that we can create a response object
+        try:
+            response = PatientRegisterResponse(
+                user_id=str(patient.id),
+                email=request.email,
+                full_name=f"{request.first_name} {request.last_name}",
+                next_steps=[
+                    "Check your email for the 6-digit verification code",
+                    "Complete email verification to activate your account",
+                    "Login after verification is complete",
+                    "Complete your profile and preferences",
+                    "Start searching for mental health specialists"
+                ]
+            )
+            print(f"DEBUG: Patient response object created successfully")
+        except Exception as e:
+            print(f"ERROR: Failed to create patient response object: {str(e)}")
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create response: {str(e)}"
+            )
+        
         # Commit transaction
         db.commit()
+        print(f"DEBUG: Patient database transaction committed successfully")
         
         # Send ONLY verification email (no completion email yet)
         verification_sent = safe_send_verification_email(
             request.email, otp, USERTYPE.PATIENT, request.first_name
         )
         
+        print(f"DEBUG: Patient email sending result: {verification_sent}")
+        
         if not verification_sent:
             # Log warning but don't fail registration
             print(f"Warning: Verification email failed to send to {request.email}")
         
-        return PatientRegisterResponse(
-            user_id=str(patient.id),
-            email=request.email,
-            full_name=f"{request.first_name} {request.last_name}",
-            next_steps=[
-                "Check your email for the 6-digit verification code",
-                "Complete email verification to activate your account",
-                "Login after verification is complete",
-                "Complete your profile and preferences",
-                "Start searching for mental health specialists"
-            ]
-        )
+        print(f"DEBUG: About to return patient response")
+        return response
         
     except HTTPException:
         db.rollback()
@@ -383,12 +425,16 @@ async def register_patient(
             detail=f"Validation error: {str(ve)}"
         )
     except IntegrityError as ie:
+        print(f"ERROR: Database integrity error: {str(ie)}")
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Registration conflict - please try again"
         )
     except Exception as e:
+        print(f"ERROR: Unexpected error during specialist registration: {str(e)}")
+        print(f"ERROR: Error type: {type(e)}")
+        print(f"ERROR: Error details: {e}")
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -413,6 +459,11 @@ async def register_specialist(
 ):
     """Register a new specialist with email verification and admin approval (registration complete only after verification)"""
     try:
+        print(f"DEBUG: Specialist registration attempt for email: {request.email}")
+        print(f"DEBUG: Request data: {request.dict()}")
+        print(f"DEBUG: Terms acceptance: {request.accepts_terms_and_conditions}")
+        print(f"DEBUG: Request type: {type(request)}")
+        print(f"DEBUG: Request dict type: {type(request.dict())}")
         # Check if email is already verified for this user type
         if check_verified_email_exists_for_user_type(db, request.email, USERTYPE.SPECIALIST):
             raise HTTPException(
@@ -422,6 +473,7 @@ async def register_specialist(
         
         # Check if email exists but is pending verification
         if check_pending_email_exists_for_user_type(db, request.email, USERTYPE.SPECIALIST):
+            print(f"DEBUG: Found pending registration for {request.email}, deleting existing records")
             # Delete the existing pending registration to allow re-registration
             existing_specialist = db.query(Specialists).filter(
                 Specialists.email == request.email.lower(),
@@ -429,6 +481,7 @@ async def register_specialist(
             ).first()
             
             if existing_specialist:
+                print(f"DEBUG: Deleting existing specialist ID: {existing_specialist.id}")
                 # Delete related records first due to foreign key constraints
                 db.query(SpecialistsAuthInfo).filter(
                     SpecialistsAuthInfo.specialist_id == existing_specialist.id
@@ -441,33 +494,36 @@ async def register_specialist(
                 # Delete the specialist record
                 db.delete(existing_specialist)
                 db.flush()
+                print(f"DEBUG: Existing records deleted successfully")
         
-        # Convert enums safely
-        gender_enum = convert_string_to_enum(request.gender, SpecialistGenderEnum)
-        specialist_type_enum = convert_string_to_enum(request.specialist_type, SpecialistTypeEnum)
-        
-        # Create specialist record (NOT VERIFIED YET)
+        # Create specialist record with minimal information (NOT VERIFIED YET)
+        print(f"DEBUG: Creating specialist record with data: first_name={request.first_name}, last_name={request.last_name}, email={request.email.lower()}")
         specialist = Specialists(
             first_name=request.first_name,
             last_name=request.last_name,
             email=request.email.lower(),
-            phone=request.phone,
-            gender=gender_enum,
-            city=request.city,
-            specialist_type=specialist_type_enum,
-            years_experience=request.years_experience,
+            # Set default values for required fields
+            phone=None,  # Will be filled in complete profile
+            gender=None,  # Will be filled in complete profile
+            city=None,  # Will be filled in complete profile
+            specialist_type=None,  # Will be filled in complete profile
+            years_experience=None,  # Will be filled in complete profile
             availability_status=AvailabilityStatusEnum.NOT_ACCEPTING,
             approval_status=ApprovalStatusEnum.PENDING,
             accepts_terms_and_conditions=request.accepts_terms_and_conditions
         )
+        print(f"DEBUG: Specialist object created: {specialist}")
         db.add(specialist)
         db.flush()
+        print(f"DEBUG: Specialist added to database with ID: {specialist.id}")
         
         # Generate OTP
         otp = generate_otp()
         otp_expiry = get_otp_expiry()
+        print(f"DEBUG: Generated OTP: {otp}, expires at: {otp_expiry}")
         
         # Create authentication info (UNVERIFIED)
+        print(f"DEBUG: Creating auth info for specialist ID: {specialist.id}")
         auth_info = SpecialistsAuthInfo(
             specialist_id=specialist.id,
             hashed_password=hash_password(request.password),
@@ -476,60 +532,95 @@ async def register_specialist(
             otp_expires_at=otp_expiry,
             user_type=USERTYPE.SPECIALIST
         )
+        print(f"DEBUG: Auth info object created: {auth_info}")
         db.add(auth_info)
+        print(f"DEBUG: Auth info added to database")
         
-        # Create approval data record
+        # Create approval data record with minimal information
+        print(f"DEBUG: Creating approval data for specialist ID: {specialist.id}")
         approval_data = SpecialistsApprovalData(
             specialist_id=specialist.id,
-            license_number=request.license_number,
+            license_number=None,  # Will be filled in complete profile
             submission_date=datetime.now(),
             background_check_status='pending'
         )
+        print(f"DEBUG: Approval data object created: {approval_data}")
         db.add(approval_data)
+        print(f"DEBUG: Approval data added to database")
+        
+        # Validate that we can create a response object
+        try:
+            print(f"DEBUG: Creating SpecialistRegisterResponse object")
+            response = SpecialistRegisterResponse(
+                message="Specialist registration successful",
+                user_id=str(specialist.id),
+                email=request.email,
+                full_name=f"{request.first_name} {request.last_name}",
+                next_steps=[
+                    "Check your email for the 6-digit verification code",
+                    "Complete email verification to activate your account",
+                    "Login after verification to complete your profile",
+                    "Submit required documents for approval",
+                    "Wait for admin approval (typically 2-3 business days)"
+                ]
+            )
+            print(f"DEBUG: Response object created successfully: {response}")
+        except Exception as e:
+            print(f"ERROR: Failed to create response object: {str(e)}")
+            print(f"ERROR: Error type: {type(e)}")
+            print(f"ERROR: Specialist data: id={specialist.id}, email={request.email}, name={request.first_name} {request.last_name}")
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create response: {str(e)}"
+            )
         
         # Commit transaction
         db.commit()
+        print(f"DEBUG: Database transaction committed successfully")
         
         # Send ONLY verification email (no completion or admin notification emails yet)
-        verification_sent = safe_send_verification_email(
-            request.email, otp, USERTYPE.SPECIALIST, request.first_name
-        )
+        try:
+            print(f"DEBUG: Attempting to send verification email")
+            verification_sent = safe_send_verification_email(
+                request.email, otp, USERTYPE.SPECIALIST, request.first_name
+            )
+            
+            print(f"DEBUG: Email sending result: {verification_sent}")
+            
+            if not verification_sent:
+                # Log warning but don't fail registration
+                print(f"Warning: Verification email failed to send to {request.email}")
+        except Exception as email_error:
+            print(f"ERROR: Exception during email sending: {str(email_error)}")
+            print(f"ERROR: Email error type: {type(email_error)}")
+            # Don't fail registration for email errors
+            verification_sent = False
         
-        if not verification_sent:
-            # Log warning but don't fail registration
-            print(f"Warning: Verification email failed to send to {request.email}")
+        print(f"DEBUG: About to return response")
+        return response
         
-        return SpecialistRegisterResponse(
-            message="Specialist registration successful",
-            user_id=str(specialist.id),
-            email=request.email,
-            full_name=f"{request.first_name} {request.last_name}",
-            next_steps=[
-                "Check your email for the 6-digit verification code",
-                "Complete email verification to activate your account",
-                "Upload required documents for approval after verification", 
-                "Wait for admin approval (typically 2-3 business days)",
-                "Complete your profile setup once approved"
-            ]
-        )
-        
-    except HTTPException:
+    except HTTPException as he:
         db.rollback()
+        print(f"HTTPException in specialist registration: {str(he)}")
         raise
     except ValueError as ve:
         db.rollback()
+        print(f"ValueError in specialist registration: {str(ve)}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Validation error: {str(ve)}"
         )
     except IntegrityError as ie:
         db.rollback()
+        print(f"IntegrityError in specialist registration: {str(ie)}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Registration conflict - please try again"
         )
     except Exception as e:
         db.rollback()
+        print(f"Exception in specialist registration: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Registration failed: {str(e)}"
@@ -564,21 +655,24 @@ def complete_patient_registration_after_verification(db: Session, patient: Patie
 def complete_specialist_registration_after_verification(db: Session, specialist: Specialists) -> bool:
     """Complete specialist registration after email verification - send completion and admin notification emails"""
     try:
-        # Send completion email
+        print(f"DEBUG: Completing specialist registration for: {specialist.email}")
+        print(f"DEBUG: Specialist type: {specialist.specialist_type}")
+        
+        # Send completion email - handle None specialist_type
         completion_sent = safe_send_completion_email(
             specialist.email, 
             specialist.first_name, 
             specialist.last_name,
-            specialist.specialist_type,
+            specialist.specialist_type,  # This can be None during initial registration
             "specialist"
         )
         
-        # Send admin notification
+        # Send admin notification - handle None specialist_type
         admin_notified = safe_notify_admins(db, {
             'email': specialist.email,
             'first_name': specialist.first_name,
             'last_name': specialist.last_name,
-            'specialization': specialist.specialist_type
+            'specialization': specialist.specialist_type  # This can be None during initial registration
         })
         
         if completion_sent:

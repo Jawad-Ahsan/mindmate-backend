@@ -111,3 +111,4 @@ if __name__ == "__main__":
     print("=" * 40)
     delete_all_specialists()
     print("\n🏁 Cleanup complete!")
+

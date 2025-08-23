@@ -346,9 +346,59 @@ async def complete_profile(
 ):
     """Complete specialist profile with professional information and specializations"""
     try:
-        print(f"Profile completion request for specialist: {specialist.email}")
+        print(f"DEBUG: Profile completion request for specialist: {specialist.email}")
+        print(f"DEBUG: Specialist ID: {specialist.id}")
+        print(f"DEBUG: Request data: {request.dict()}")
+        print(f"DEBUG: Request data type: {type(request)}")
+        print(f"DEBUG: Current approval status: {specialist.approval_status}")
+        
+        # Log each field individually for debugging
+        print(f"DEBUG: Phone: {request.phone}")
+        print(f"DEBUG: Address: {request.address}")
+        print(f"DEBUG: Clinic name: {request.clinic_name}")
+        print(f"DEBUG: Bio: {request.bio}")
+        print(f"DEBUG: Consultation fee: {request.consultation_fee}")
+        print(f"DEBUG: Languages: {request.languages_spoken}")
+        print(f"DEBUG: Website: {request.website_url}")
+        print(f"DEBUG: Social media: {request.social_media_links}")
+        print(f"DEBUG: Specializations count: {len(request.specializations)}")
+        for i, spec in enumerate(request.specializations):
+            print(f"DEBUG: Spec {i}: {spec.dict()}")
+        
+        # Validate required fields are not empty
+        print(f"DEBUG: Validating required fields")
+        if not request.phone or not request.phone.strip():
+            raise HTTPException(status_code=400, detail="Phone number is required")
+        if not request.address or not request.address.strip():
+            raise HTTPException(status_code=400, detail="Address is required")
+        if not request.bio or not request.bio.strip():
+            raise HTTPException(status_code=400, detail="Bio is required")
+        if not request.consultation_fee or request.consultation_fee <= 0:
+            raise HTTPException(status_code=400, detail="Consultation fee must be greater than 0")
+        if not request.languages_spoken or len(request.languages_spoken) == 0:
+            raise HTTPException(status_code=400, detail="At least one language is required")
+        if not request.specializations or len(request.specializations) == 0:
+            raise HTTPException(status_code=400, detail="At least one specialization is required")
+        
+        # Validate specialization structure
+        print(f"DEBUG: Validating specialization structure")
+        for i, spec in enumerate(request.specializations):
+            if not spec.specialization:
+                raise HTTPException(status_code=400, detail=f"Specialization {i+1}: specialization type is required")
+            if not spec.years_of_experience_in_specialization or spec.years_of_experience_in_specialization < 0:
+                raise HTTPException(status_code=400, detail=f"Specialization {i+1}: years of experience must be 0 or greater")
+            if not isinstance(spec.is_primary_specialization, bool):
+                raise HTTPException(status_code=400, detail=f"Specialization {i+1}: is_primary_specialization must be a boolean")
+        
+        # Check for exactly one primary specialization
+        primary_count = sum(1 for spec in request.specializations if spec.is_primary_specialization)
+        if primary_count != 1:
+            raise HTTPException(status_code=400, detail="Exactly one specialization must be marked as primary")
+        
+        print(f"DEBUG: All required fields validated successfully")
         
         # Update specialist basic information
+        print(f"DEBUG: Updating specialist basic information")
         specialist.phone = request.phone
         specialist.address = request.address
         specialist.clinic_name = request.clinic_name
@@ -357,18 +407,23 @@ async def complete_profile(
         specialist.languages_spoken = request.languages_spoken
         specialist.website_url = request.website_url
         specialist.social_media_links = request.social_media_links if request.social_media_links else {}
+        print(f"DEBUG: Basic information updated successfully")
         
         # Clear existing specializations to replace with new ones
+        print(f"DEBUG: Clearing existing specializations")
         existing_specializations = db.query(SpecialistSpecializations).filter(
             SpecialistSpecializations.specialist_id == specialist.id
         ).all()
+        print(f"DEBUG: Found {len(existing_specializations)} existing specializations to delete")
         
         for spec in existing_specializations:
             db.delete(spec)
         
         db.flush()  # Ensure deletions are committed before insertions
+        print(f"DEBUG: Existing specializations cleared")
         
         # Add new specializations
+        print(f"DEBUG: Adding {len(request.specializations)} new specializations")
         for spec_data in request.specializations:
             specialization = SpecialistSpecializations(
                 specialist_id=specialist.id,
@@ -378,17 +433,42 @@ async def complete_profile(
                 certification_date=spec_data.certification_date
             )
             db.add(specialization)
+            print(f"DEBUG: Added specialization: {spec_data.specialization} (primary: {spec_data.is_primary_specialization})")
         
         # Update timestamps
         specialist.updated_at = datetime.now(timezone.utc)
         
         # Commit all changes
+        print(f"DEBUG: Committing all changes to database")
         db.commit()
+        print(f"DEBUG: Database commit successful")
         
-        print(f"Profile completed successfully for specialist: {specialist.email}")
+        print(f"DEBUG: Profile completed successfully for specialist: {specialist.email}")
         
         # Calculate completion percentage and missing fields
+        print(f"DEBUG: Calculating profile completion percentage")
         completion_percentage, missing_fields = calculate_profile_completion(specialist)
+        print(f"DEBUG: Profile completion: {completion_percentage}%, Missing fields: {missing_fields}")
+        
+        # Notify admins about profile completion
+        print(f"DEBUG: Notifying admins about profile completion")
+        try:
+            from ..registeration.register import safe_notify_admins
+            admin_notified = safe_notify_admins(db, {
+                'email': specialist.email,
+                'first_name': specialist.first_name,
+                'last_name': specialist.last_name,
+                'specialization': specialist.specialist_type.value if specialist.specialist_type else "Specialist",
+                'profile_completed': True,
+                'completion_percentage': completion_percentage
+            })
+            if admin_notified:
+                print(f"DEBUG: Admin notification sent successfully")
+            else:
+                print(f"DEBUG: Admin notification failed")
+        except Exception as e:
+            print(f"DEBUG: Error notifying admins: {str(e)}")
+            # Don't fail the profile completion for admin notification errors
         
         # Determine next steps based on profile completion and approval status
         next_steps = []
@@ -467,33 +547,47 @@ async def submit_documents(
 ):
     """Submit documents for specialist verification with admin notification"""
     try:
-        print(f"Document submission for specialist: {specialist.email}, type: {document_type}")
+        print(f"DEBUG: Document submission for specialist: {specialist.email}")
+        print(f"DEBUG: Specialist ID: {specialist.id}")
+        print(f"DEBUG: Document type: {document_type}")
+        print(f"DEBUG: Document name: {document_name}")
+        print(f"DEBUG: File size: {file.size} bytes")
+        print(f"DEBUG: File type: {file.content_type}")
+        print(f"DEBUG: Expiry date: {expiry_date}")
         
         # Validate file
+        print(f"DEBUG: Validating uploaded file")
         validate_file_upload(file)
+        print(f"DEBUG: File validation passed")
         
         # Parse expiry date if provided
         parsed_expiry_date = None
         if expiry_date:
+            print(f"DEBUG: Parsing expiry date: {expiry_date}")
             try:
                 parsed_expiry_date = datetime.fromisoformat(expiry_date)
                 if parsed_expiry_date <= datetime.now():
+                    print(f"DEBUG: Expiry date validation failed - date is in the past")
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="Document expiry date must be in the future"
                     )
+                print(f"DEBUG: Expiry date parsed successfully: {parsed_expiry_date}")
             except ValueError:
+                print(f"DEBUG: Expiry date parsing failed - invalid format")
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Invalid expiry date format. Use YYYY-MM-DD."
                 )
         
         # Get or create approval data
+        print(f"DEBUG: Getting or creating approval data for specialist ID: {specialist.id}")
         approval_data = db.query(SpecialistsApprovalData).filter(
             SpecialistsApprovalData.specialist_id == specialist.id
         ).first()
         
         if not approval_data:
+            print(f"DEBUG: No existing approval data found, creating new record")
             approval_data = SpecialistsApprovalData(
                 specialist_id=specialist.id,
                 submission_date=datetime.now(timezone.utc),
@@ -501,36 +595,48 @@ async def submit_documents(
             )
             db.add(approval_data)
             db.flush()
+            print(f"DEBUG: New approval data created with ID: {approval_data.id}")
+        else:
+            print(f"DEBUG: Found existing approval data with ID: {approval_data.id}")
         
         # Check if document type already exists (replace if exists)
+        print(f"DEBUG: Checking for existing document of type: {document_type}")
         existing_doc = db.query(SpecialistDocuments).filter(
             SpecialistDocuments.approval_data_id == approval_data.id,
             SpecialistDocuments.document_type == document_type
         ).first()
         
         if existing_doc:
+            print(f"DEBUG: Found existing document with ID: {existing_doc.id}, replacing it")
             # Delete old file if exists
             if os.path.exists(existing_doc.file_path):
                 try:
                     os.remove(existing_doc.file_path)
+                    print(f"DEBUG: Old file deleted: {existing_doc.file_path}")
                 except Exception as e:
-                    print(f"Failed to delete old file {existing_doc.file_path}: {str(e)}")
+                    print(f"DEBUG: Failed to delete old file {existing_doc.file_path}: {str(e)}")
             
             # Delete existing record
             db.delete(existing_doc)
             db.flush()
+            print(f"DEBUG: Existing document record deleted")
+        else:
+            print(f"DEBUG: No existing document of this type found")
         
         # Save new file
+        print(f"DEBUG: Saving uploaded file")
         try:
             file_path = save_uploaded_file(file, str(specialist.id), document_type.value)
+            print(f"DEBUG: File saved successfully at: {file_path}")
         except Exception as e:
-            print(f"File save error: {str(e)}")
+            print(f"DEBUG: File save error: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to save uploaded file. Please try again."
             )
         
         # Create document record
+        print(f"DEBUG: Creating document record in database")
         document = SpecialistDocuments(
             approval_data_id=approval_data.id,
             document_type=document_type,
@@ -543,14 +649,18 @@ async def submit_documents(
             expiry_date=parsed_expiry_date
         )
         db.add(document)
+        print(f"DEBUG: Document record added to database")
         
         # Update approval data submission date
         approval_data.submission_date = datetime.now(timezone.utc)
+        print(f"DEBUG: Approval data submission date updated")
         
         # Commit transaction
+        print(f"DEBUG: Committing document submission transaction")
         db.commit()
+        print(f"DEBUG: Document transaction committed successfully")
         
-        print(f"Document saved successfully: {document.id}")
+        print(f"DEBUG: Document saved successfully with ID: {document.id}")
         
         # Send admin notification
         admin_notified = notify_admins_document_submission(

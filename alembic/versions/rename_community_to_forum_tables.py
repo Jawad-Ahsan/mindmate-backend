@@ -182,3 +182,4 @@ def downgrade():
     op.drop_index(op.f('ix_forum_questions_category'), table_name='forum_questions')
     op.drop_index(op.f('ix_forum_questions_author_id'), table_name='forum_questions')
     op.drop_table('forum_questions')
+

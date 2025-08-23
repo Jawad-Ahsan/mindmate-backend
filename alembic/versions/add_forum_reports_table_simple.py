@@ -61,3 +61,4 @@ def downgrade():
     
     # Drop table
     op.drop_table('forum_reports')
+

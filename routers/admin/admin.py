@@ -6,13 +6,14 @@ Handles admin-specific operations like user management
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Dict, Any
 from datetime import datetime
+from decimal import Decimal
 
 from database.database import get_db
 from routers.authentication.authenticate import get_current_user_from_token
 from models.sql_models.patient_models import Patient, PatientAuthInfo
-from models.sql_models.specialist_models import Specialists, SpecialistsAuthInfo, SpecialistsApprovalData
+from models.sql_models.specialist_models import Specialists, SpecialistsAuthInfo, SpecialistsApprovalData, SpecialistSpecializations, SpecialistDocuments
 from models.sql_models.admin_models import Admin, AdminRoleEnum
 from models.sql_models.forum_models import ForumReport, ForumQuestion, ForumAnswer
 
@@ -52,17 +53,27 @@ class SpecialistResponse(BaseModel):
     email: str
     full_name: str
     phone: str | None
+    address: str | None
     city: str | None
+    clinic_name: str | None
+    bio: str | None
+    consultation_fee: Decimal | None
+    languages_spoken: List[str] | None
+    website_url: str | None
+    social_media_links: Dict[str, str] | None
     specialist_type: str | None
     years_experience: int | None
     approval_status: str
     created_at: datetime
     last_login: datetime | None
+    specializations: List[Dict[str, Any]] | None = None
+    documents: List[Dict[str, Any]] | None = None
 
     model_config = ConfigDict(
         from_attributes=True,
         json_encoders={
-            datetime: lambda v: v.isoformat() if v else None
+            datetime: lambda v: v.isoformat() if v else None,
+            Decimal: lambda v: float(v) if v else None
         }
     )
 
@@ -244,17 +255,61 @@ async def get_all_specialists(
                 SpecialistsAuthInfo.specialist_id == specialist.id
             ).first()
             
+            # Get specializations
+            specializations = db.query(SpecialistSpecializations).filter(
+                SpecialistSpecializations.specialist_id == specialist.id
+            ).all()
+            
+            # Get documents
+            approval_data = db.query(SpecialistsApprovalData).filter(
+                SpecialistsApprovalData.specialist_id == specialist.id
+            ).first()
+            
+            documents = []
+            if approval_data:
+                docs = db.query(SpecialistDocuments).filter(
+                    SpecialistDocuments.approval_data_id == approval_data.id
+                ).all()
+                documents = [
+                    {
+                        "id": str(doc.id),
+                        "document_name": doc.document_name,
+                        "document_type": doc.document_type.value if doc.document_type else None,
+                        "verification_status": doc.verification_status.value if doc.verification_status else None,
+                        "upload_date": doc.upload_date,
+                        "expiry_date": doc.expiry_date
+                    }
+                    for doc in docs
+                ]
+            
             result.append(SpecialistResponse(
                 id=str(specialist.id),
                 email=specialist.email,
                 full_name=f"{specialist.first_name} {specialist.last_name}",
                 phone=specialist.phone,
+                address=specialist.address,
                 city=specialist.city,
+                clinic_name=specialist.clinic_name,
+                bio=specialist.bio,
+                consultation_fee=specialist.consultation_fee,
+                languages_spoken=specialist.languages_spoken,
+                website_url=specialist.website_url,
+                social_media_links=specialist.social_media_links,
                 specialist_type=specialist.specialist_type.value if specialist.specialist_type else None,
                 years_experience=specialist.years_experience,
                 approval_status=specialist.approval_status.value if specialist.approval_status else "pending",
                 created_at=specialist.created_at,
-                last_login=auth_info.last_login_at if auth_info else None
+                last_login=auth_info.last_login_at if auth_info else None,
+                specializations=[
+                    {
+                        "specialization": spec.specialization.value if spec.specialization else None,
+                        "years_of_experience_in_specialization": spec.years_of_experience_in_specialization,
+                        "is_primary_specialization": spec.is_primary_specialization,
+                        "certification_date": spec.certification_date
+                    }
+                    for spec in specializations
+                ] if specializations else None,
+                documents=documents
             ))
         
         return result
@@ -291,6 +346,24 @@ async def approve_specialist(
                 detail="Specialist not found"
             )
         
+        # Check if specialist has completed profile and submitted documents
+        if not specialist.phone or not specialist.address or not specialist.bio:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Specialist must complete their profile before approval"
+            )
+        
+        # Check if documents are submitted
+        approval_data = db.query(SpecialistsApprovalData).filter(
+            SpecialistsApprovalData.specialist_id == specialist.id
+        ).first()
+        
+        if not approval_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Specialist must submit required documents before approval"
+            )
+        
         # Update approval status
         specialist.approval_status = "approved"
         specialist.availability_status = "accepting_new_patients"
@@ -315,7 +388,136 @@ async def reject_specialist(
     current_user_data: dict = Depends(get_current_user_from_token),
     db: Session = Depends(get_db)
 ):
-    """Reject a specialist (admin only) - this will delete their account"""
+    """Reject a specialist (admin only)"""
+    try:
+        # Verify admin permissions
+        admin_user = verify_admin_permissions(current_user_data)
+        
+        # Find the specialist
+        specialist = db.query(Specialists).filter(
+            Specialists.id == specialist_id,
+            Specialists.is_deleted == False
+        ).first()
+        
+        if not specialist:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Specialist not found"
+            )
+        
+        # Update approval status to rejected
+        specialist.approval_status = "rejected"
+        specialist.availability_status = "not_accepting_new_patients"
+        
+        db.commit()
+        
+        return {"message": "Specialist rejected successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"Error rejecting specialist: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reject specialist"
+        )
+
+@router.post("/specialists/{specialist_id}/suspend")
+async def suspend_specialist(
+    specialist_id: str,
+    current_user_data: dict = Depends(get_current_user_from_token),
+    db: Session = Depends(get_db)
+):
+    """Suspend a specialist (admin only)"""
+    try:
+        # Verify admin permissions
+        admin_user = verify_admin_permissions(current_user_data)
+        
+        # Find the specialist
+        specialist = db.query(Specialists).filter(
+            Specialists.id == specialist_id,
+            Specialists.is_deleted == False
+        ).first()
+        
+        if not specialist:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Specialist not found"
+            )
+        
+        # Update approval status to suspended
+        specialist.approval_status = "suspended"
+        specialist.availability_status = "not_accepting_new_patients"
+        
+        db.commit()
+        
+        return {"message": "Specialist suspended successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"Error suspending specialist: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to suspend specialist"
+        )
+
+@router.post("/specialists/{specialist_id}/unsuspend")
+async def unsuspend_specialist(
+    specialist_id: str,
+    current_user_data: dict = Depends(get_current_user_from_token),
+    db: Session = Depends(get_db)
+):
+    """Unsuspend a specialist (admin only)"""
+    try:
+        # Verify admin permissions
+        admin_user = verify_admin_permissions(current_user_data)
+        
+        # Find the specialist
+        specialist = db.query(Specialists).filter(
+            Specialists.id == specialist_id,
+            Specialists.is_deleted == False
+        ).first()
+        
+        if not specialist:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Specialist not found"
+            )
+        
+        # Check if specialist was previously approved
+        if specialist.approval_status == "suspended":
+            # Restore to approved status
+            specialist.approval_status = "approved"
+            specialist.availability_status = "accepting_new_patients"
+        else:
+            # If not previously approved, set to pending
+            specialist.approval_status = "pending"
+            specialist.availability_status = "not_accepting_new_patients"
+        
+        db.commit()
+        
+        return {"message": "Specialist unsuspended successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"Error unsuspending specialist: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to unsuspend specialist"
+        )
+
+@router.delete("/specialists/{specialist_id}")
+async def delete_specialist(
+    specialist_id: str,
+    current_user_data: dict = Depends(get_current_user_from_token),
+    db: Session = Depends(get_db)
+):
+    """Delete a specialist (admin only)"""
     try:
         # Verify admin permissions
         admin_user = verify_admin_permissions(current_user_data)
@@ -353,16 +555,107 @@ async def reject_specialist(
         db.delete(specialist)
         db.commit()
         
-        return {"message": "Specialist rejected and account deleted successfully"}
+        return {"message": "Specialist deleted successfully"}
         
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
-        print(f"Error rejecting specialist: {str(e)}")
+        print(f"Error deleting specialist: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to reject specialist"
+            detail="Failed to delete specialist"
+        )
+
+@router.get("/specialists/{specialist_id}/details")
+async def get_specialist_details(
+    specialist_id: str,
+    current_user_data: dict = Depends(get_current_user_from_token),
+    db: Session = Depends(get_db)
+):
+    """Get detailed specialist information including documents (admin only)"""
+    try:
+        # Verify admin permissions
+        admin_user = verify_admin_permissions(current_user_data)
+        
+        # Find the specialist
+        specialist = db.query(Specialists).filter(
+            Specialists.id == specialist_id,
+            Specialists.is_deleted == False
+        ).first()
+        
+        if not specialist:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Specialist not found"
+            )
+        
+        # Get approval data and documents
+        approval_data = db.query(SpecialistsApprovalData).filter(
+            SpecialistsApprovalData.specialist_id == specialist.id
+        ).first()
+        
+        documents = []
+        if approval_data:
+            from models.sql_models.specialist_models import SpecialistDocuments
+            documents = db.query(SpecialistDocuments).filter(
+                SpecialistDocuments.approval_data_id == approval_data.id
+            ).all()
+        
+        # Get specializations
+        from models.sql_models.specialist_models import SpecialistSpecializations
+        specializations = db.query(SpecialistSpecializations).filter(
+            SpecialistSpecializations.specialist_id == specialist.id
+        ).all()
+        
+        return {
+            "id": str(specialist.id),
+            "email": specialist.email,
+            "full_name": f"{specialist.first_name} {specialist.last_name}",
+            "phone": specialist.phone,
+            "city": specialist.city,
+            "specialist_type": specialist.specialist_type.value if specialist.specialist_type else None,
+            "years_experience": specialist.years_experience,
+            "approval_status": specialist.approval_status.value if specialist.approval_status else "pending",
+            "availability_status": specialist.availability_status.value if specialist.availability_status else "not_accepting",
+            "bio": specialist.bio,
+            "consultation_fee": specialist.consultation_fee,
+            "languages_spoken": specialist.languages_spoken,
+            "website_url": specialist.website_url,
+            "clinic_name": specialist.clinic_name,
+            "created_at": specialist.created_at,
+            "updated_at": specialist.updated_at,
+            "specializations": [
+                {
+                    "specialization": spec.specialization.value,
+                    "years_of_experience": spec.years_of_experience_in_specialization,
+                    "is_primary": spec.is_primary_specialization,
+                    "certification_date": spec.certification_date
+                } for spec in specializations
+            ],
+            "documents": [
+                {
+                    "id": str(doc.id),
+                    "document_type": doc.document_type.value,
+                    "document_name": doc.document_name,
+                    "verification_status": doc.verification_status.value,
+                    "upload_date": doc.upload_date,
+                    "expiry_date": doc.expiry_date
+                } for doc in documents
+            ],
+            "approval_data": {
+                "submission_date": approval_data.submission_date if approval_data else None,
+                "background_check_status": approval_data.background_check_status if approval_data else None
+            } if approval_data else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error fetching specialist details: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve specialist details"
         )
 
 # ============================================================================

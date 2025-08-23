@@ -535,7 +535,7 @@ def create_specialist_forum_profile(
         profile_data = {
             "specialist_id": specialist_id,
             "display_name": f"Dr. {specialist.first_name} {specialist.last_name}",
-            "specialist_type": specialist.specialist_type.value,
+            "specialist_type": specialist.specialist_type.value if specialist.specialist_type else "Specialist",
             "years_experience": specialist.years_experience,
             "city": specialist.city,
             "overall_rating": float(specialist.average_rating),

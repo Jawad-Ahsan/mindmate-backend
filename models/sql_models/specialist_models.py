@@ -112,20 +112,20 @@ class Specialists(Base, SQLBaseModel):
     first_name = Column(String(100), nullable=False, index=True)
     last_name = Column(String(100), nullable=False, index=True)
     email = Column(String(255), nullable=False, unique=True, index=True)
-    phone = Column(String(20))
+    phone = Column(String(20), nullable=True)  # Made nullable for new flow
     date_of_birth = Column(DateTime(timezone=True), nullable=True)
-    gender = Column(Enum(GenderEnum), nullable=False )
+    gender = Column(Enum(GenderEnum), nullable=True)  # Made nullable for new flow
 
     
     # Professional Information
-    specialist_type = Column(SA_Enum(SpecialistTypeEnum), nullable=False, index=True)
-    years_experience = Column(Integer, default=0, nullable=False)
+    specialist_type = Column(SA_Enum(SpecialistTypeEnum), nullable=True, index=True)  # Made nullable for new flow
+    years_experience = Column(Integer, default=0, nullable=True)  # Made nullable for new flow
     
     # Consent to policy
     accepts_terms_and_conditions = Column(Boolean, default=False)
     
     # Contact & Location
-    city = Column(String(100), nullable=False, index=True)
+    city = Column(String(100), nullable=True, index=True)  # Made nullable for new flow
     address = Column(Text, nullable=True)
     clinic_name = Column(String(200), nullable=True)
     
@@ -168,13 +168,13 @@ class Specialists(Base, SQLBaseModel):
 
     # Table Constraints
     __table_args__ = (
-        CheckConstraint('years_experience >= 0 AND years_experience <= 60', name='chk_specialists_experience_range'),
+        # Only apply experience constraint if years_experience is not None
+        CheckConstraint('(years_experience IS NULL) OR (years_experience >= 0 AND years_experience <= 60)', name='chk_specialists_experience_range'),
         CheckConstraint('average_rating >= 0.0 AND average_rating <= 5.0', name='chk_specialists_rating_range'),
-        CheckConstraint('consultation_fee >= 0', name='chk_specialists_fee_positive'),
+        CheckConstraint('(consultation_fee IS NULL) OR (consultation_fee >= 0)', name='chk_specialists_fee_positive'),
         CheckConstraint('total_reviews >= 0', name='chk_specialists_reviews_positive'),
         CheckConstraint('total_appointments >= 0', name='chk_specialists_appointments_positive'),
         Index('idx_specialists_name', 'first_name', 'last_name'),
-        Index('idx_specialists_location', 'city', 'specialist_type'),
         Index('idx_specialists_status', 'approval_status', 'availability_status'),
         Index('idx_specialists_rating', 'average_rating', 'total_reviews'),
         {'extend_existing': True}
@@ -206,23 +206,13 @@ class Specialists(Base, SQLBaseModel):
         )
     
     # ============================================================================
-    # VALIDATION METHODS
+    # VALIDATION METHODS - MODIFIED FOR NEW REGISTRATION FLOW
     # ============================================================================
     
-    @validates('email')
-    def validate_email(self, key, email):
-        if not email:
-            raise ValueError("Email is required")
-        if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
-            raise ValueError("Invalid email format")
-        return email.lower()
-
     @validates('phone')
     def validate_phone(self, key, phone):
-        if not phone:
-            raise ValueError("Phone number is required")
-        # Pakistani phone number format
-        if not re.match(r'^\+?92[0-9]{10}$', phone):
+        # Phone is now optional during registration, only validate format if provided
+        if phone and not re.match(r'^\+?92[0-9]{10}$', phone):
             raise ValueError("Phone must be in Pakistani format: +92XXXXXXXXXX")
         return phone
 
@@ -260,7 +250,9 @@ class Specialists(Base, SQLBaseModel):
         self.total_appointments += 1
 
     def __repr__(self) -> str:
-        return f"<Specialist({self.full_name}, {self.specialist_type.value}, {self.city})>"
+        specialist_type_str = self.specialist_type.value if self.specialist_type else "Not Specified"
+        city_str = self.city if self.city else "Not Specified"
+        return f"<Specialist({self.full_name}, {specialist_type_str}, {city_str})>"
 
 # ============================================================================
 # AUTHENTICATION INFORMATION TABLE
