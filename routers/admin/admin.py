@@ -4,20 +4,95 @@ Admin Router - API endpoints for admin operations
 Handles admin-specific operations like user management
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 from datetime import datetime
 from decimal import Decimal
+import os
+import mimetypes
+from jose import JWTError, jwt
 
 from database.database import get_db
 from routers.authentication.authenticate import get_current_user_from_token
 from models.sql_models.patient_models import Patient, PatientAuthInfo
-from models.sql_models.specialist_models import Specialists, SpecialistsAuthInfo, SpecialistsApprovalData, SpecialistSpecializations, SpecialistDocuments
+from utils.email_utils import send_specialist_approval_email, safe_enum_to_string
+from models.sql_models.specialist_models import (
+    Specialists, SpecialistsAuthInfo, SpecialistsApprovalData, 
+    SpecialistSpecializations, SpecialistDocuments, SpecialistAvailability,
+    TimeSlotEnum, ApprovalStatusEnum
+)
 from models.sql_models.admin_models import Admin, AdminRoleEnum
 from models.sql_models.forum_models import ForumReport, ForumQuestion, ForumAnswer
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
+
+async def get_current_user_from_token_or_query(
+    request: Request,
+    db: Session = Depends(get_db)
+) -> dict:
+    """Extract current user from JWT token (header or query parameter)"""
+    from fastapi.security import HTTPAuthorizationCredentials
+    from fastapi.security import HTTPBearer
+    
+    security = HTTPBearer()
+    
+    try:
+        # First try to get token from Authorization header
+        try:
+            credentials: HTTPAuthorizationCredentials = await security(request)
+            if credentials and credentials.credentials:
+                token = credentials.credentials
+            else:
+                raise HTTPException(status_code=401, detail="No token in header")
+        except:
+            # If header fails, try query parameter
+            token = request.query_params.get("token")
+            if not token:
+                raise HTTPException(status_code=401, detail="No authentication token provided")
+        
+        # Decode and validate token
+        try:
+            SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
+            ALGORITHM = "HS256"
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        except JWTError:
+            raise HTTPException(status_code=401, detail="Invalid authentication token")
+        
+        user_id: str = payload.get("sub")
+        email: str = payload.get("email")
+        user_type: str = payload.get("user_type")
+        
+        if user_id is None or email is None or user_type is None:
+            raise HTTPException(status_code=401, detail="Invalid token payload")
+        
+        # Verify admin permissions
+        if user_type != "admin":
+            raise HTTPException(status_code=403, detail="Admin access required")
+        
+        # Find admin user
+        admin = db.query(Admin).filter(
+            Admin.id == user_id,
+            Admin.email == email,
+            Admin.is_deleted == False
+        ).first()
+        
+        if not admin:
+            raise HTTPException(status_code=401, detail="Admin user not found")
+        
+        return {
+            "user_id": user_id,
+            "email": email,
+            "user_type": user_type,
+            "admin": admin
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Authentication error: {str(e)}")
+        raise HTTPException(status_code=401, detail="Authentication failed")
 
 # ============================================================================
 # PYDANTIC MODELS
@@ -68,6 +143,9 @@ class SpecialistResponse(BaseModel):
     last_login: datetime | None
     specializations: List[Dict[str, Any]] | None = None
     documents: List[Dict[str, Any]] | None = None
+    availability_slots: List[str] | None = None
+    profile_completion_percentage: float | None = None
+    submission_date: datetime | None = None
 
     model_config = ConfigDict(
         from_attributes=True,
@@ -128,6 +206,279 @@ def verify_admin_permissions(current_user_data: dict) -> Admin:
         )
     
     return user
+
+def calculate_profile_completion_for_admin(specialist, specializations, availability_slots, documents):
+    """Calculate profile completion percentage for admin view"""
+    try:
+        required_fields = {
+            'phone': specialist.phone,
+            'address': specialist.address,
+            'bio': specialist.bio,
+            'consultation_fee': specialist.consultation_fee,
+            'languages_spoken': specialist.languages_spoken,
+            'specializations': len(specializations) > 0,
+            'availability_slots': len(availability_slots) > 0
+        }
+        
+        # Count completed required fields
+        completed_required = sum(1 for value in required_fields.values() if value)
+        total_required = len(required_fields)
+        
+        # Check documents (4 mandatory documents required)
+        mandatory_doc_types = ['identity_card', 'degree', 'license', 'experience_letter']
+        uploaded_doc_types = [doc.get('document_type') for doc in documents]
+        completed_documents = sum(1 for doc_type in mandatory_doc_types if doc_type in uploaded_doc_types)
+        
+        # Calculate weighted completion percentage
+        # Profile fields: 70%, Documents: 30%
+        profile_percentage = (completed_required / total_required) * 70
+        document_percentage = (completed_documents / 4) * 30
+        
+        total_percentage = profile_percentage + document_percentage
+        return round(total_percentage, 1)
+        
+    except Exception as e:
+        print(f"Error calculating profile completion: {str(e)}")
+        return 0.0
+
+# ============================================================================
+# DOCUMENT SERVING ENDPOINTS
+# ============================================================================
+
+@router.get("/documents/{document_id}/view")
+async def view_document(
+    document_id: str,
+    current_user_data: dict = Depends(get_current_user_from_token_or_query),
+    db: Session = Depends(get_db)
+):
+    """View a specialist document (admin only)"""
+    try:
+        # Verify admin permissions (current_user_data already contains admin info)
+        admin_user = current_user_data["admin"]
+        
+        # Find the document
+        document = db.query(SpecialistDocuments).filter(
+            SpecialistDocuments.id == document_id
+        ).first()
+        
+        if not document:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found"
+            )
+        
+        # Check if file exists
+        if not os.path.exists(document.file_path):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document file not found on server"
+            )
+        
+        # Get MIME type
+        content_type, _ = mimetypes.guess_type(document.file_path)
+        if not content_type:
+            content_type = document.mime_type or "application/octet-stream"
+        
+        # Return file for viewing (inline)
+        return FileResponse(
+            path=document.file_path,
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f"inline; filename={document.document_name}",
+                "Cache-Control": "no-cache"
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error viewing document: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to view document"
+        )
+
+@router.get("/documents/{document_id}/download")
+async def download_document(
+    document_id: str,
+    current_user_data: dict = Depends(get_current_user_from_token_or_query),
+    db: Session = Depends(get_db)
+):
+    """Download a specialist document (admin only)"""
+    try:
+        # Verify admin permissions (current_user_data already contains admin info)
+        admin_user = current_user_data["admin"]
+        
+        # Find the document
+        document = db.query(SpecialistDocuments).filter(
+            SpecialistDocuments.id == document_id
+        ).first()
+        
+        if not document:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found"
+            )
+        
+        # Check if file exists
+        if not os.path.exists(document.file_path):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document file not found on server"
+            )
+        
+        # Get MIME type
+        content_type, _ = mimetypes.guess_type(document.file_path)
+        if not content_type:
+            content_type = document.mime_type or "application/octet-stream"
+        
+        # Return file for download (attachment)
+        return FileResponse(
+            path=document.file_path,
+            media_type=content_type,
+            filename=document.document_name,
+            headers={
+                "Content-Disposition": f"attachment; filename={document.document_name}",
+                "Cache-Control": "no-cache"
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error downloading document: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to download document"
+        )
+
+@router.get("/specialists/{specialist_id}/details")
+async def get_specialist_details(
+    specialist_id: str,
+    current_user_data: dict = Depends(get_current_user_from_token),
+    db: Session = Depends(get_db)
+):
+    """Get detailed specialist information (admin only)"""
+    try:
+        # Verify admin permissions
+        admin_user = verify_admin_permissions(current_user_data)
+        
+        # Find the specialist
+        specialist = db.query(Specialists).filter(
+            Specialists.id == specialist_id,
+            Specialists.is_deleted == False
+        ).first()
+        
+        if not specialist:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Specialist not found"
+            )
+        
+        # Get auth info
+        auth_info = db.query(SpecialistsAuthInfo).filter(
+            SpecialistsAuthInfo.specialist_id == specialist.id
+        ).first()
+        
+        # Get specializations
+        specializations = db.query(SpecialistSpecializations).filter(
+            SpecialistSpecializations.specialist_id == specialist.id
+        ).all()
+        
+        # Get approval data and documents
+        approval_data = db.query(SpecialistsApprovalData).filter(
+            SpecialistsApprovalData.specialist_id == specialist.id
+        ).first()
+        
+        documents = []
+        if approval_data:
+            docs = db.query(SpecialistDocuments).filter(
+                SpecialistDocuments.approval_data_id == approval_data.id
+            ).all()
+            documents = [
+                {
+                    "id": str(doc.id),
+                    "document_name": doc.document_name,
+                    "document_type": doc.document_type.value if doc.document_type else None,
+                    "verification_status": doc.verification_status.value if doc.verification_status else None,
+                    "upload_date": doc.upload_date,
+                    "expiry_date": doc.expiry_date,
+                    "file_size": doc.file_size,
+                    "mime_type": doc.mime_type,
+                    "verification_notes": doc.verification_notes,
+                    "verified_by": str(doc.verified_by) if doc.verified_by else None,
+                    "verified_at": doc.verified_at
+                }
+                for doc in docs
+            ]
+        
+        # Get availability slots
+        availability_slots = db.query(SpecialistAvailability).filter(
+            SpecialistAvailability.specialist_id == specialist.id
+        ).all()
+        availability_list = [
+            {
+                "time_slot": slot.time_slot.value,
+                "display": slot.slot_display,
+                "created_at": slot.created_at
+            }
+            for slot in availability_slots
+        ]
+        
+        # Calculate profile completion
+        profile_completion = calculate_profile_completion_for_admin(specialist, specializations, availability_slots, documents)
+        
+        # Enhanced response with all details
+        return {
+            "id": str(specialist.id),
+            "email": specialist.email,
+            "full_name": f"{specialist.first_name} {specialist.last_name}",
+            "first_name": specialist.first_name,
+            "last_name": specialist.last_name,
+            "phone": specialist.phone,
+            "address": specialist.address,
+            "city": specialist.city,
+            "clinic_name": specialist.clinic_name,
+            "bio": specialist.bio,
+            "consultation_fee": float(specialist.consultation_fee) if specialist.consultation_fee else None,
+            "languages_spoken": specialist.languages_spoken,
+            "website_url": specialist.website_url,
+            "social_media_links": specialist.social_media_links,
+            "specialist_type": specialist.specialist_type.value if specialist.specialist_type else None,
+            "years_experience": specialist.years_experience,
+            "approval_status": specialist.approval_status.value if specialist.approval_status else "pending",
+            "created_at": specialist.created_at,
+            "updated_at": specialist.updated_at,
+            "last_login": auth_info.last_login_at if auth_info else None,
+            "email_verification_status": auth_info.email_verification_status.value if auth_info and auth_info.email_verification_status else None,
+            "specializations": [
+                {
+                    "specialization": spec.specialization.value if spec.specialization else None,
+                    "years_of_experience_in_specialization": spec.years_of_experience_in_specialization,
+                    "is_primary_specialization": spec.is_primary_specialization,
+                    "certification_date": spec.certification_date,
+                    "created_at": spec.created_at
+                }
+                for spec in specializations
+            ],
+            "documents": documents,
+            "availability_slots": availability_list,
+            "profile_completion_percentage": profile_completion,
+            "approval_data": {
+                "license_number": approval_data.license_number if approval_data else None,
+                "submission_date": approval_data.updated_at if approval_data else None,
+                "created_at": approval_data.created_at if approval_data else None
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error fetching specialist details: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve specialist details"
+        )
 
 # ============================================================================
 # API ENDPOINTS
@@ -277,10 +628,26 @@ async def get_all_specialists(
                         "document_type": doc.document_type.value if doc.document_type else None,
                         "verification_status": doc.verification_status.value if doc.verification_status else None,
                         "upload_date": doc.upload_date,
-                        "expiry_date": doc.expiry_date
+                        "expiry_date": doc.expiry_date,
+                        "file_size": doc.file_size,
+                        "mime_type": doc.mime_type
                     }
                     for doc in docs
                 ]
+            
+            # Get availability slots
+            availability_slots = db.query(SpecialistAvailability).filter(
+                SpecialistAvailability.specialist_id == specialist.id
+            ).all()
+            availability_list = [slot.time_slot.value for slot in availability_slots] if availability_slots else []
+            
+            # Calculate profile completion percentage
+            profile_completion = calculate_profile_completion_for_admin(specialist, specializations, availability_slots, documents)
+            
+            # Get submission date (when they submitted for approval)
+            submission_date = None
+            if specialist.approval_status == ApprovalStatusEnum.UNDER_REVIEW and approval_data:
+                submission_date = approval_data.updated_at
             
             result.append(SpecialistResponse(
                 id=str(specialist.id),
@@ -309,7 +676,10 @@ async def get_all_specialists(
                     }
                     for spec in specializations
                 ] if specializations else None,
-                documents=documents
+                documents=documents,
+                availability_slots=availability_list,
+                profile_completion_percentage=profile_completion,
+                submission_date=submission_date
             ))
         
         return result
@@ -346,11 +716,22 @@ async def approve_specialist(
                 detail="Specialist not found"
             )
         
-        # Check if specialist has completed profile and submitted documents
+        # Enhanced validation for profile completion
         if not specialist.phone or not specialist.address or not specialist.bio:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Specialist must complete their profile before approval"
+            )
+        
+        # Check if availability slots are set
+        availability_slots = db.query(SpecialistAvailability).filter(
+            SpecialistAvailability.specialist_id == specialist.id
+        ).all()
+        
+        if not availability_slots:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Specialist must set availability slots before approval"
             )
         
         # Check if documents are submitted
@@ -364,13 +745,54 @@ async def approve_specialist(
                 detail="Specialist must submit required documents before approval"
             )
         
+        # Check if all mandatory documents are uploaded
+        documents = db.query(SpecialistDocuments).filter(
+            SpecialistDocuments.approval_data_id == approval_data.id
+        ).all()
+        
+        mandatory_doc_types = ['identity_card', 'degree', 'license', 'experience_letter']
+        uploaded_doc_types = [doc.document_type.value for doc in documents]
+        missing_docs = [doc_type for doc_type in mandatory_doc_types if doc_type not in uploaded_doc_types]
+        
+        if missing_docs:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Missing mandatory documents: {', '.join(missing_docs)}"
+            )
+        
         # Update approval status
-        specialist.approval_status = "approved"
+        specialist.approval_status = ApprovalStatusEnum.APPROVED
         specialist.availability_status = "accepting_new_patients"
+        
+        # Get primary specialization for email
+        primary_spec = db.query(SpecialistSpecializations).filter(
+            SpecialistSpecializations.specialist_id == specialist.id,
+            SpecialistSpecializations.is_primary_specialization == True
+        ).first()
+        
+        specialization_name = safe_enum_to_string(primary_spec.specialization) if primary_spec else "Mental Health"
+        
+        # Send approval email to specialist
+        try:
+            send_specialist_approval_email(
+                email=specialist.email,
+                first_name=specialist.first_name,
+                last_name=specialist.last_name,
+                specialization=specialization_name,
+                status="approved"
+            )
+        except Exception as e:
+            print(f"Failed to send approval email: {str(e)}")
+            # Don't fail the approval if email fails
         
         db.commit()
         
-        return {"message": "Specialist approved successfully"}
+        return {
+            "message": "Specialist approved successfully",
+            "specialist_id": str(specialist.id),
+            "approval_status": "approved",
+            "email_sent": True
+        }
         
     except HTTPException:
         raise
@@ -406,12 +828,39 @@ async def reject_specialist(
             )
         
         # Update approval status to rejected
-        specialist.approval_status = "rejected"
+        specialist.approval_status = ApprovalStatusEnum.REJECTED
         specialist.availability_status = "not_accepting_new_patients"
+        
+        # Get primary specialization for email
+        primary_spec = db.query(SpecialistSpecializations).filter(
+            SpecialistSpecializations.specialist_id == specialist.id,
+            SpecialistSpecializations.is_primary_specialization == True
+        ).first()
+        
+        specialization_name = safe_enum_to_string(primary_spec.specialization) if primary_spec else "Mental Health"
+        
+        # Send rejection email to specialist
+        try:
+            send_specialist_approval_email(
+                email=specialist.email,
+                first_name=specialist.first_name,
+                last_name=specialist.last_name,
+                specialization=specialization_name,
+                status="rejected",
+                admin_notes="Your application has been reviewed. Please contact support for more information."
+            )
+        except Exception as e:
+            print(f"Failed to send rejection email: {str(e)}")
+            # Don't fail the rejection if email fails
         
         db.commit()
         
-        return {"message": "Specialist rejected successfully"}
+        return {
+            "message": "Specialist rejected successfully",
+            "specialist_id": str(specialist.id),
+            "approval_status": "rejected",
+            "email_sent": True
+        }
         
     except HTTPException:
         raise
@@ -447,7 +896,7 @@ async def suspend_specialist(
             )
         
         # Update approval status to suspended
-        specialist.approval_status = "suspended"
+        specialist.approval_status = ApprovalStatusEnum.SUSPENDED
         specialist.availability_status = "not_accepting_new_patients"
         
         db.commit()
@@ -488,13 +937,13 @@ async def unsuspend_specialist(
             )
         
         # Check if specialist was previously approved
-        if specialist.approval_status == "suspended":
+        if specialist.approval_status == ApprovalStatusEnum.SUSPENDED:
             # Restore to approved status
-            specialist.approval_status = "approved"
+            specialist.approval_status = ApprovalStatusEnum.APPROVED
             specialist.availability_status = "accepting_new_patients"
         else:
             # If not previously approved, set to pending
-            specialist.approval_status = "pending"
+            specialist.approval_status = ApprovalStatusEnum.PENDING
             specialist.availability_status = "not_accepting_new_patients"
         
         db.commit()

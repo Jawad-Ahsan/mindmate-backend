@@ -97,6 +97,17 @@ class DocumentStatusEnum(str, enum.Enum):
     REJECTED = "rejected"
     NEEDS_RESUBMISSION = "needs_resubmission"
 
+class TimeSlotEnum(str, enum.Enum):
+    """Available time slots for specialist consultation"""
+    SLOT_09_10 = "09:00-10:00"  # 9:00 AM to 10:00 AM
+    SLOT_10_11 = "10:00-11:00"  # 10:00 AM to 11:00 AM
+    SLOT_11_12 = "11:00-12:00"  # 11:00 AM to 12:00 PM
+    SLOT_12_13 = "12:00-13:00"  # 12:00 PM to 1:00 PM
+    SLOT_13_14 = "13:00-14:00"  # 1:00 PM to 2:00 PM
+    SLOT_14_15 = "14:00-15:00"  # 2:00 PM to 3:00 PM
+    SLOT_15_16 = "15:00-16:00"  # 3:00 PM to 4:00 PM
+    SLOT_16_17 = "16:00-17:00"  # 4:00 PM to 5:00 PM
+
 # ============================================================================
 # CORE SPECIALIST TABLE
 # ============================================================================
@@ -160,6 +171,7 @@ class Specialists(Base, SQLBaseModel):
     auth_info = relationship("SpecialistsAuthInfo", back_populates="specialist", uselist=False, cascade="all, delete-orphan")
     approval_data = relationship("SpecialistsApprovalData", back_populates="specialist", cascade="all, delete-orphan")
     specializations = relationship("SpecialistSpecializations", back_populates="specialist", cascade="all, delete-orphan")
+    availability_slots = relationship("SpecialistAvailability", back_populates="specialist", cascade="all, delete-orphan")
     
     # External relationships (to be defined in other models)
     appointments = relationship("Appointment", back_populates="specialist", lazy="dynamic", cascade="all, delete-orphan")
@@ -690,6 +702,59 @@ def search_specialists_by_criteria(
     return query.all()
 
 # ============================================================================
+# SPECIALIST AVAILABILITY TABLE
+# ============================================================================
+
+class SpecialistAvailability(Base, SQLBaseModel):
+    """
+    Specialist availability time slots
+    Stores the daily available time slots for each specialist
+    """
+    __tablename__ = "specialist_availability"
+
+    # Foreign Key
+    specialist_id = Column(UUID(as_uuid=True), ForeignKey('specialists.id', ondelete='CASCADE'), nullable=False)
+    
+    # Time Slot Information
+    time_slot = Column(SA_Enum(TimeSlotEnum), nullable=False, index=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    
+    # Metadata
+    created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False)
+    
+    # Relationship
+    specialist = relationship("Specialists", back_populates="availability_slots")
+
+    # Table Constraints
+    __table_args__ = (
+        # Ensure specialist can't have duplicate time slots
+        UniqueConstraint('specialist_id', 'time_slot', name='uq_specialist_timeslot'),
+        Index('idx_availability_specialist_active', 'specialist_id', 'is_active'),
+        Index('idx_availability_timeslot', 'time_slot'),
+        {'extend_existing': True}
+    )
+    
+    # ============================================================================
+    # PROPERTIES
+    # ============================================================================
+    
+    @hybrid_property
+    def slot_display(self) -> str:
+        """Return human-readable time slot format"""
+        time_mapping = {
+            TimeSlotEnum.SLOT_09_10: "9:00 AM - 10:00 AM",
+            TimeSlotEnum.SLOT_10_11: "10:00 AM - 11:00 AM", 
+            TimeSlotEnum.SLOT_11_12: "11:00 AM - 12:00 PM",
+            TimeSlotEnum.SLOT_12_13: "12:00 PM - 1:00 PM",
+            TimeSlotEnum.SLOT_13_14: "1:00 PM - 2:00 PM",
+            TimeSlotEnum.SLOT_14_15: "2:00 PM - 3:00 PM",
+            TimeSlotEnum.SLOT_15_16: "3:00 PM - 4:00 PM",
+            TimeSlotEnum.SLOT_16_17: "4:00 PM - 5:00 PM"
+        }
+        return time_mapping.get(self.time_slot, str(self.time_slot))
+
+# ============================================================================
 # EXPORTS
 # ============================================================================
 
@@ -702,10 +767,12 @@ __all__ = [
     "EmailVerificationStatusEnum",
     "DocumentTypeEnum",
     "DocumentStatusEnum",
+    "TimeSlotEnum",
     
     # Models
     "Specialists",
     "SpecialistsAuthInfo",
+    "SpecialistAvailability",
     "SpecialistsApprovalData", 
     "SpecialistDocuments",
     "SpecialistSpecializations",

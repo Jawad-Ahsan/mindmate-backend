@@ -14,7 +14,8 @@ import re
 
 from models.sql_models.specialist_models import (
     SpecializationEnum, DocumentTypeEnum, SpecialistTypeEnum,
-    ApprovalStatusEnum, EmailVerificationStatusEnum, DocumentStatusEnum
+    ApprovalStatusEnum, EmailVerificationStatusEnum, DocumentStatusEnum,
+    TimeSlotEnum
 )
 
 
@@ -38,25 +39,7 @@ class SpecializationEnum(str, Enum):
     PERSONALITY_DISORDERS = "personality_disorders"
     GRIEF_COUNSELING = "grief_counseling"
 
-class DocumentTypeEnum(str, Enum):
-    """Document types for approval"""
-    # Mandatory Documents
-    CNIC_FRONT = "cnic_front"
-    CNIC_BACK = "cnic_back"
-    DEGREE_CERTIFICATE = "degree_certificate"
-    LICENSE_REGISTRATION = "license_registration"
-    EXPERIENCE_CERTIFICATE = "experience_certificate"
-    RECENT_PHOTOGRAPH = "recent_photograph"
-    ETHICS_DECLARATION = "ethics_declaration"
-    
-    # Optional Documents
-    DIPLOMA_CERTIFICATION = "diploma_certification"
-    INTERNATIONAL_MEMBERSHIP = "international_membership"
-    RESEARCH_PUBLICATION = "research_publication"
-    REFERENCE_LETTER = "reference_letter"
-    
-    # Legacy/Other
-    OTHER = "other"
+# DocumentTypeEnum is imported from SQL models above
 
 class SpecialistTypeEnum(str, Enum):
     """Mental health specialist types"""
@@ -147,8 +130,20 @@ class SocialMediaLinks(BaseModel):
     @field_validator('linkedin', 'twitter', 'facebook', 'instagram', 'professional_website')
     @classmethod
     def validate_urls(cls, v):
-        if v and not re.match(r'^https?://', v):
-            raise ValueError('URL must start with http:// or https://')
+        if v and v.strip():
+            v = v.strip()
+            # Auto-add https:// if URL doesn't start with http:// or https://
+            if not v.startswith(('http://', 'https://')):
+                if v.startswith('www.'):
+                    v = 'https://' + v
+                else:
+                    v = 'https://' + v
+            
+            # Basic URL format validation
+            url_pattern = r'^https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}([/\w.-]*)*/?$'
+            if not re.match(url_pattern, v):
+                raise ValueError('Please enter a valid website URL (e.g., www.example.com or https://example.com)')
+            return v
         return v
 
 # ============================================================================
@@ -206,7 +201,7 @@ class CompleteProfileRequest(BaseModel):
     website_url: Optional[str] = Field(None, max_length=500, description="Professional website URL")
     
     # Professional Information
-    bio: str = Field(..., min_length=50, max_length=2000, description="Professional biography")
+    bio: str = Field(..., min_length=1, max_length=2000, description="Professional biography (minimum 20 words)")
     consultation_fee: float = Field(..., gt=0, le=50000, description="Consultation fee in PKR")
     languages_spoken: List[str] = Field(..., min_items=1, description="Languages spoken (language codes)")
     
@@ -216,6 +211,14 @@ class CompleteProfileRequest(BaseModel):
         min_items=1, 
         max_items=5, 
         description="Areas of specialization"
+    )
+    
+    # Availability Slots
+    availability_slots: List[TimeSlotEnum] = Field(
+        ...,
+        min_items=1,
+        max_items=8,
+        description="Available time slots for consultations (minimum 1 hour, maximum 8 hours per day)"
     )
     
     # Professional Credentials
@@ -286,11 +289,21 @@ class CompleteProfileRequest(BaseModel):
     @field_validator('bio')
     @classmethod
     def validate_bio(cls, v):
-        if not v or len(v.strip()) < 50:
-            raise ValueError('Bio must be at least 50 characters long')
-        if len(v.strip()) > 2000:
+        if not v or not v.strip():
+            raise ValueError('Bio is required')
+        
+        v = v.strip()
+        # Count words (split by whitespace and filter out empty strings)
+        words = [word for word in v.split() if word.strip()]
+        word_count = len(words)
+        
+        if word_count < 20:
+            raise ValueError(f'Bio must contain at least 20 words. Currently has {word_count} words.')
+        
+        if len(v) > 2000:
             raise ValueError('Bio cannot exceed 2000 characters')
-        return v.strip()
+            
+        return v
     
     @field_validator('consultation_fee')
     @classmethod
@@ -318,11 +331,44 @@ class CompleteProfileRequest(BaseModel):
         
         return [lang.lower() for lang in set(v)]  # Remove duplicates and normalize
     
+    @field_validator('availability_slots')
+    @classmethod
+    def validate_availability_slots(cls, v):
+        if not v or len(v) == 0:
+            raise ValueError('At least one availability slot must be selected')
+        
+        if len(v) > 8:
+            raise ValueError('Maximum 8 availability slots allowed (8 hours per day)')
+        
+        # Check for duplicates
+        if len(set(v)) != len(v):
+            raise ValueError('Duplicate time slots are not allowed')
+        
+        # Validate each slot is a valid enum value
+        valid_slots = [slot.value for slot in TimeSlotEnum]
+        for slot in v:
+            if slot.value not in valid_slots:
+                raise ValueError(f'Invalid time slot: {slot.value}')
+        
+        return v
+    
     @field_validator('website_url', 'profile_image_url')
     @classmethod
     def validate_urls(cls, v):
-        if v and not re.match(r'^https?://', v):
-            raise ValueError('URL must start with http:// or https://')
+        if v and v.strip():
+            v = v.strip()
+            # Auto-add https:// if URL doesn't start with http:// or https://
+            if not v.startswith(('http://', 'https://')):
+                if v.startswith('www.'):
+                    v = 'https://' + v
+                else:
+                    v = 'https://' + v
+            
+            # Basic URL format validation
+            url_pattern = r'^https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}([/\w.-]*)*/?$'
+            if not re.match(url_pattern, v):
+                raise ValueError('Please enter a valid website URL (e.g., www.example.com or https://example.com)')
+            return v
         return v
     
     @field_validator('cnic')
@@ -384,15 +430,12 @@ class CompleteProfileRequest(BaseModel):
         if len(doc_types) != len(set(doc_types)):
             raise ValueError('Duplicate document types are not allowed')
         
-        # Check for mandatory documents
+        # Check for mandatory documents (using existing SQL model enum values)
         mandatory_docs = [
-            DocumentTypeEnum.CNIC_FRONT,
-            DocumentTypeEnum.CNIC_BACK,
-            DocumentTypeEnum.DEGREE_CERTIFICATE,
-            DocumentTypeEnum.LICENSE_REGISTRATION,
-            DocumentTypeEnum.EXPERIENCE_CERTIFICATE,
-            DocumentTypeEnum.RECENT_PHOTOGRAPH,
-            DocumentTypeEnum.ETHICS_DECLARATION
+            DocumentTypeEnum.IDENTITY_CARD,
+            DocumentTypeEnum.DEGREE,
+            DocumentTypeEnum.LICENSE,
+            DocumentTypeEnum.EXPERIENCE_LETTER
         ]
         missing_mandatory = [doc_type for doc_type in mandatory_docs if doc_type not in doc_types]
         

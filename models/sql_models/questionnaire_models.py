@@ -73,4 +73,46 @@ class MandatoryQuestionnaireSubmission(Base, SQLBaseModel):
 		Index('idx_mandatory_q_complete', 'is_complete'),
 	)
 
+	def to_dict(self):
+		"""Convert questionnaire to dictionary"""
+		return {
+			"id": str(self.id),
+			"patient_id": str(self.patient_id),
+			"full_name": self.full_name,
+			"age": self.age,
+			"gender": self.gender,
+			"chief_complaint": self.chief_complaint,
+			"past_psychiatric_diagnosis": self.past_psychiatric_diagnosis,
+			"past_psychiatric_treatment": self.past_psychiatric_treatment,
+			"hospitalizations": self.hospitalizations,
+			"ect_history": self.ect_history,
+			"current_medications": self.current_medications,
+			"medication_allergies": self.medication_allergies,
+			"otc_supplements": self.otc_supplements,
+			"medication_adherence": self.medication_adherence,
+			"medical_history_summary": self.medical_history_summary,
+			"chronic_illnesses": self.chronic_illnesses,
+			"neurological_problems": self.neurological_problems,
+			"head_injury": self.head_injury,
+			"seizure_history": self.seizure_history,
+			"pregnancy_status": self.pregnancy_status,
+			"alcohol_use": self.alcohol_use,
+			"drug_use": self.drug_use,
+			"prescription_drug_abuse": self.prescription_drug_abuse,
+			"last_use_date": self.last_use_date,
+			"substance_treatment": self.substance_treatment,
+			"tobacco_use": self.tobacco_use,
+			"family_mental_health_history": self.family_mental_health_history,
+			"family_mental_health_stigma": self.family_mental_health_stigma,
+			"cultural_background": self.cultural_background,
+			"cultural_beliefs": self.cultural_beliefs,
+			"spiritual_supports": self.spiritual_supports,
+			"lifestyle_smoking": self.lifestyle_smoking,
+			"lifestyle_alcohol": self.lifestyle_alcohol,
+			"lifestyle_activity": self.lifestyle_activity,
+			"submitted_at": self.submitted_at.isoformat() if self.submitted_at else None,
+			"processed": self.processed,
+			"is_complete": self.is_complete
+		}
+
 

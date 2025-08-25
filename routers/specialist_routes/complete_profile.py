@@ -18,9 +18,9 @@ import uuid
 # Import database models
 from models.sql_models.specialist_models import (
     Specialists, SpecialistsAuthInfo, SpecialistsApprovalData,
-    SpecialistDocuments, SpecialistSpecializations,
+    SpecialistDocuments, SpecialistSpecializations, SpecialistAvailability,
     SpecializationEnum, DocumentTypeEnum, DocumentStatusEnum,
-    ApprovalStatusEnum, EmailVerificationStatusEnum
+    ApprovalStatusEnum, EmailVerificationStatusEnum, TimeSlotEnum
 )
 from models.sql_models.base_model import USERTYPE
 
@@ -28,7 +28,7 @@ from models.sql_models.base_model import USERTYPE
 from ..authentication.authenticate import get_current_user_from_token
 
 # Import utilities
-from utils.email_utils import send_notification_email, safe_enum_to_string
+from utils.email_utils import send_notification_email, safe_enum_to_string, send_admin_specialist_registration_notification
 from database.database import get_db
 
 router = APIRouter(prefix="/specialist", tags=["Specialist Profile"])
@@ -41,6 +41,36 @@ ALLOWED_MIME_TYPES = {
     "application/pdf", "image/jpeg", "image/png", 
     "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 }
+
+# Mandatory documents configuration (using existing SQL model enum values)
+MANDATORY_DOCUMENTS = [
+    {
+        "type": DocumentTypeEnum.IDENTITY_CARD,
+        "label": "Identity Card (CNIC)",
+        "description": "Clear photo of your CNIC (both sides)",
+        "required": True
+    },
+    {
+        "type": DocumentTypeEnum.DEGREE,
+        "label": "Degree Certificate",
+        "description": "Your highest degree certificate in mental health field",
+        "required": True
+    },
+    {
+        "type": DocumentTypeEnum.LICENSE,
+        "label": "Professional License",
+        "description": "Valid professional license or registration certificate",
+        "required": True
+    },
+    {
+        "type": DocumentTypeEnum.EXPERIENCE_LETTER,
+        "label": "Experience Letter", 
+        "description": "Work experience certificate or letter from previous employer",
+        "required": True
+    }
+]
+
+MANDATORY_DOCUMENT_TYPES = [doc["type"] for doc in MANDATORY_DOCUMENTS]
 
 # ============================================================================
 # PYDANTIC MODELS
@@ -61,15 +91,18 @@ class ProfileCompletionRequest(BaseModel):
     clinic_name: Optional[str] = Field(None, max_length=200, description="Clinic or practice name")
     
     # Professional Details
-    bio: str = Field(..., min_length=50, max_length=2000, description="Professional biography")
+    bio: str = Field(..., min_length=1, max_length=2000, description="Professional biography (minimum 20 words)")
     consultation_fee: Decimal = Field(..., ge=0, le=50000, description="Fee in PKR")
     languages_spoken: List[str] = Field(..., min_items=1, description="Languages spoken (language codes)")
     
     # Specializations
     specializations: List[SpecializationItem] = Field(..., min_items=1, max_items=5)
     
+    # Availability Slots  
+    availability_slots: List[TimeSlotEnum] = Field(..., min_items=1, max_items=8, description="Available time slots (1-8 hours per day)")
+    
     # Optional Professional Info
-    website_url: Optional[str] = Field(None, pattern=r'^https?://.*', description="Professional website")
+    website_url: Optional[str] = Field(None, description="Professional website (https://, http://, or www. format accepted)")
     social_media_links: Optional[Dict[str, str]] = Field(None, description="Social media profiles")
     
     @validator('specializations')
@@ -95,6 +128,58 @@ class ProfileCompletionRequest(BaseModel):
         for lang in v:
             if lang not in valid_languages:
                 raise ValueError(f"Unsupported language code: {lang}")
+        return v
+    
+    @validator('availability_slots')
+    def validate_availability_slots(cls, v):
+        if not v or len(v) == 0:
+            raise ValueError('At least one availability slot must be selected')
+        
+        if len(v) > 8:
+            raise ValueError('Maximum 8 availability slots allowed (8 hours per day)')
+        
+        # Check for duplicates
+        unique_slots = set(v)
+        if len(unique_slots) != len(v):
+            raise ValueError('Duplicate time slots are not allowed')
+        
+        return v
+    
+    @validator('website_url')
+    def validate_website_url(cls, v):
+        if v and v.strip():
+            v = v.strip()
+            # Auto-add https:// if URL doesn't start with http:// or https://
+            if not v.startswith(('http://', 'https://')):
+                if v.startswith('www.'):
+                    v = 'https://' + v
+                else:
+                    v = 'https://' + v
+            
+            # Basic URL format validation
+            import re
+            url_pattern = r'^https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}([/\w.-]*)*/?$'
+            if not re.match(url_pattern, v):
+                raise ValueError('Please enter a valid website URL (e.g., www.example.com or https://example.com)')
+            return v
+        return v
+    
+    @validator('bio')
+    def validate_bio_word_count(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Bio is required')
+        
+        v = v.strip()
+        # Count words (split by whitespace and filter out empty strings)
+        words = [word for word in v.split() if word.strip()]
+        word_count = len(words)
+        
+        if word_count < 20:
+            raise ValueError(f'Bio must contain at least 20 words. Currently has {word_count} words.')
+        
+        if len(v) > 2000:
+            raise ValueError('Bio cannot exceed 2000 characters')
+            
         return v
 
 class DocumentSubmissionRequest(BaseModel):
@@ -171,45 +256,10 @@ def save_uploaded_file(file: UploadFile, specialist_id: str, document_type: str)
     
     return file_path
 
-def calculate_profile_completion(specialist: Specialists) -> tuple:
-    """Calculate profile completion percentage and missing fields"""
-    required_fields = {
-        'phone': specialist.phone,
-        'address': specialist.address,
-        'bio': specialist.bio,
-        'consultation_fee': specialist.consultation_fee,
-        'languages_spoken': specialist.languages_spoken,
-    }
+# Profile completion calculation removed - now handled in frontend
+# Profile completion calculation removed
     
-    optional_fields = {
-        'clinic_name': specialist.clinic_name,
-        'website_url': specialist.website_url,
-        'social_media_links': specialist.social_media_links,
-    }
-    
-    # Check specializations
-    has_specializations = len(specialist.specializations) > 0
-    
-    completed_required = sum(1 for value in required_fields.values() if value)
-    total_required = len(required_fields) + (1 if has_specializations else 0)
-    
-    completed_optional = sum(1 for value in optional_fields.values() if value)
-    total_optional = len(optional_fields)
-    
-    # Weight: 80% for required, 20% for optional
-    completion_percentage = int(
-        (completed_required / total_required * 0.8 + 
-         completed_optional / total_optional * 0.2) * 100
-    )
-    
-    missing_fields = [
-        field for field, value in required_fields.items() 
-        if not value
-    ]
-    if not has_specializations:
-        missing_fields.append('specializations')
-    
-    return completion_percentage, missing_fields
+# All profile completion calculation logic removed
 
 def get_admin_emails_for_notifications(db: Session) -> List[str]:
     """Get admin emails for notifications"""
@@ -365,35 +415,68 @@ async def complete_profile(
         for i, spec in enumerate(request.specializations):
             print(f"DEBUG: Spec {i}: {spec.dict()}")
         
-        # Validate required fields are not empty
+        # Comprehensive validation of all required fields
         print(f"DEBUG: Validating required fields")
+        validation_errors = []
+        
+        # Phone validation
         if not request.phone or not request.phone.strip():
-            raise HTTPException(status_code=400, detail="Phone number is required")
+            validation_errors.append("Phone number is required and cannot be empty")
+        
+        # Address validation  
         if not request.address or not request.address.strip():
-            raise HTTPException(status_code=400, detail="Address is required")
+            validation_errors.append("Address is required and cannot be empty")
+        elif len(request.address.strip()) < 10:
+            validation_errors.append("Address must be at least 10 characters long")
+        
+        # Bio validation (word count will be checked by Pydantic validator)
         if not request.bio or not request.bio.strip():
-            raise HTTPException(status_code=400, detail="Bio is required")
+            validation_errors.append("Bio is required and cannot be empty")
+        
+        # Consultation fee validation
         if not request.consultation_fee or request.consultation_fee <= 0:
-            raise HTTPException(status_code=400, detail="Consultation fee must be greater than 0")
+            validation_errors.append("Consultation fee is required and must be greater than 0")
+        
+        # Languages validation
         if not request.languages_spoken or len(request.languages_spoken) == 0:
-            raise HTTPException(status_code=400, detail="At least one language is required")
+            validation_errors.append("At least one language must be selected")
+        
+        # Specializations validation
         if not request.specializations or len(request.specializations) == 0:
-            raise HTTPException(status_code=400, detail="At least one specialization is required")
+            validation_errors.append("At least one specialization is required")
+        
+        # Availability slots validation
+        if not request.availability_slots or len(request.availability_slots) == 0:
+            validation_errors.append("At least one availability slot must be selected")
+        elif len(request.availability_slots) > 8:
+            validation_errors.append("Maximum 8 availability slots allowed (8 hours per day)")
+        
+        # If any validation errors, return them all at once
+        if validation_errors:
+            error_message = "; ".join(validation_errors)
+            raise HTTPException(status_code=400, detail=f"Validation failed: {error_message}")
         
         # Validate specialization structure
         print(f"DEBUG: Validating specialization structure")
+        specialization_errors = []
+        
         for i, spec in enumerate(request.specializations):
             if not spec.specialization:
-                raise HTTPException(status_code=400, detail=f"Specialization {i+1}: specialization type is required")
-            if not spec.years_of_experience_in_specialization or spec.years_of_experience_in_specialization < 0:
-                raise HTTPException(status_code=400, detail=f"Specialization {i+1}: years of experience must be 0 or greater")
+                specialization_errors.append(f"Specialization {i+1}: specialization type is required")
+            if spec.years_of_experience_in_specialization is None or spec.years_of_experience_in_specialization < 0:
+                specialization_errors.append(f"Specialization {i+1}: years of experience must be 0 or greater")
             if not isinstance(spec.is_primary_specialization, bool):
-                raise HTTPException(status_code=400, detail=f"Specialization {i+1}: is_primary_specialization must be a boolean")
+                specialization_errors.append(f"Specialization {i+1}: is_primary_specialization must be a boolean")
         
         # Check for exactly one primary specialization
         primary_count = sum(1 for spec in request.specializations if spec.is_primary_specialization)
         if primary_count != 1:
-            raise HTTPException(status_code=400, detail="Exactly one specialization must be marked as primary")
+            specialization_errors.append("Exactly one specialization must be marked as primary")
+        
+        # If any specialization errors, return them all
+        if specialization_errors:
+            error_message = "; ".join(specialization_errors)
+            raise HTTPException(status_code=400, detail=f"Specialization validation failed: {error_message}")
         
         print(f"DEBUG: All required fields validated successfully")
         
@@ -435,6 +518,27 @@ async def complete_profile(
             db.add(specialization)
             print(f"DEBUG: Added specialization: {spec_data.specialization} (primary: {spec_data.is_primary_specialization})")
         
+        # Clear existing availability slots to replace with new ones
+        print(f"DEBUG: Clearing existing availability slots")
+        existing_slots = db.query(SpecialistAvailability).filter(
+            SpecialistAvailability.specialist_id == specialist.id
+        ).all()
+        for slot in existing_slots:
+            db.delete(slot)
+        db.flush()  # Ensure deletions are committed before insertions
+        print(f"DEBUG: Existing availability slots cleared")
+        
+        # Add new availability slots
+        print(f"DEBUG: Adding {len(request.availability_slots)} new availability slots")
+        for slot_enum in request.availability_slots:
+            availability_slot = SpecialistAvailability(
+                specialist_id=specialist.id,
+                time_slot=slot_enum,
+                is_active=True
+            )
+            db.add(availability_slot)
+            print(f"DEBUG: Added availability slot: {slot_enum.value}")
+        
         # Update timestamps
         specialist.updated_at = datetime.now(timezone.utc)
         
@@ -445,10 +549,8 @@ async def complete_profile(
         
         print(f"DEBUG: Profile completed successfully for specialist: {specialist.email}")
         
-        # Calculate completion percentage and missing fields
-        print(f"DEBUG: Calculating profile completion percentage")
-        completion_percentage, missing_fields = calculate_profile_completion(specialist)
-        print(f"DEBUG: Profile completion: {completion_percentage}%, Missing fields: {missing_fields}")
+        # Profile completion calculation removed - now handled in frontend
+        print(f"DEBUG: Profile completion calculation bypassed - validation handled in frontend")
         
         # Notify admins about profile completion
         print(f"DEBUG: Notifying admins about profile completion")
@@ -460,7 +562,7 @@ async def complete_profile(
                 'last_name': specialist.last_name,
                 'specialization': specialist.specialist_type.value if specialist.specialist_type else "Specialist",
                 'profile_completed': True,
-                'completion_percentage': completion_percentage
+                'completion_percentage': 100  # Always 100% since validation is in frontend
             })
             if admin_notified:
                 print(f"DEBUG: Admin notification sent successfully")
@@ -470,14 +572,9 @@ async def complete_profile(
             print(f"DEBUG: Error notifying admins: {str(e)}")
             # Don't fail the profile completion for admin notification errors
         
-        # Determine next steps based on profile completion and approval status
+        # Determine next steps based on approval status
         next_steps = []
-        if completion_percentage == 100:
-            next_steps.append("✅ Profile is complete!")
-        else:
-            next_steps.append(f"📋 Profile is {completion_percentage}% complete")
-            if missing_fields:
-                next_steps.append(f"❌ Missing: {', '.join(missing_fields)}")
+        next_steps.append("✅ Profile updated successfully!")
         
         if specialist.approval_status == ApprovalStatusEnum.PENDING:
             next_steps.extend([
@@ -499,8 +596,8 @@ async def complete_profile(
         
         return ProfileCompletionResponse(
             message="Profile updated successfully",
-            profile_completion_percentage=completion_percentage,
-            missing_fields=missing_fields,
+            profile_completion_percentage=100,  # Always 100% since validation is in frontend
+            missing_fields=[],  # No missing fields since validation is in frontend
             next_steps=next_steps
         )
         
@@ -520,6 +617,188 @@ async def complete_profile(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update profile. Please try again later."
+        )
+
+# ============================================================================
+# DOCUMENT MANAGEMENT ENDPOINTS
+# ============================================================================
+
+@router.get(
+    "/mandatory-documents",
+    responses={
+        200: {"description": "List of mandatory documents"},
+        403: {"model": ErrorResponse, "description": "Access denied"},
+        500: {"model": ErrorResponse, "description": "Internal server error"}
+    }
+)
+async def get_mandatory_documents(
+    specialist: Specialists = Depends(get_authenticated_specialist)
+):
+    """Get list of mandatory documents required for specialist verification"""
+    try:
+        return {
+            "mandatory_documents": MANDATORY_DOCUMENTS,
+            "total_required": len(MANDATORY_DOCUMENTS),
+            "message": "Please upload all mandatory documents for verification"
+        }
+    except Exception as e:
+        print(f"Error fetching mandatory documents: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch mandatory documents list"
+        )
+
+@router.get(
+    "/document-status",
+    responses={
+        200: {"description": "Document submission status"},
+        403: {"model": ErrorResponse, "description": "Access denied"},
+        404: {"model": ErrorResponse, "description": "Specialist not found"},
+        500: {"model": ErrorResponse, "description": "Internal server error"}
+    }
+)
+async def get_document_status(
+    db: Session = Depends(get_db),
+    specialist: Specialists = Depends(get_authenticated_specialist)
+):
+    """Get current document submission status for the specialist"""
+    try:
+        # Get specialist's approval data
+        approval_data = db.query(SpecialistsApprovalData).filter(
+            SpecialistsApprovalData.specialist_id == specialist.id
+        ).first()
+        
+        if not approval_data:
+            return {
+                "documents_submitted": [],
+                "missing_documents": MANDATORY_DOCUMENTS,
+                "submission_complete": False,
+                "total_submitted": 0,
+                "total_required": len(MANDATORY_DOCUMENTS)
+            }
+        
+        # Get submitted documents
+        submitted_docs = db.query(SpecialistDocuments).filter(
+            SpecialistDocuments.approval_data_id == approval_data.id
+        ).all()
+        
+        submitted_types = [doc.document_type for doc in submitted_docs]
+        missing_types = [doc_type for doc_type in MANDATORY_DOCUMENT_TYPES if doc_type not in submitted_types]
+        
+        # Convert missing types to full document info
+        missing_documents = [doc for doc in MANDATORY_DOCUMENTS if doc["type"] in missing_types]
+        
+        submitted_documents = []
+        for doc in submitted_docs:
+            doc_info = next((d for d in MANDATORY_DOCUMENTS if d["type"] == doc.document_type), None)
+            submitted_documents.append({
+                "id": str(doc.id),
+                "type": doc.document_type.value,
+                "label": doc_info["label"] if doc_info else doc.document_type.value.replace('_', ' ').title(),
+                "name": doc.document_name,
+                "status": doc.verification_status.value,
+                "uploaded_at": doc.upload_date.isoformat(),
+                "verified_at": doc.verified_at.isoformat() if doc.verified_at else None,
+                "verification_notes": doc.verification_notes
+            })
+        
+        return {
+            "documents_submitted": submitted_documents,
+            "missing_documents": missing_documents,
+            "submission_complete": len(missing_types) == 0,
+            "total_submitted": len(submitted_docs),
+            "total_required": len(MANDATORY_DOCUMENTS)
+        }
+        
+    except Exception as e:
+        print(f"Error fetching document status for {specialist.email}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch document status"
+        )
+
+@router.delete(
+    "/documents/{document_id}",
+    responses={
+        200: {"description": "Document deleted successfully"},
+        403: {"model": ErrorResponse, "description": "Access denied"},
+        404: {"model": ErrorResponse, "description": "Document not found"},
+        500: {"model": ErrorResponse, "description": "Internal server error"}
+    }
+)
+async def delete_document(
+    document_id: str,
+    db: Session = Depends(get_db),
+    specialist: Specialists = Depends(get_authenticated_specialist)
+):
+    """Delete a submitted document to allow replacement"""
+    try:
+        # Convert string ID to UUID
+        try:
+            doc_uuid = uuid.UUID(document_id)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid document ID format"
+            )
+        
+        # Get specialist's approval data
+        approval_data = db.query(SpecialistsApprovalData).filter(
+            SpecialistsApprovalData.specialist_id == specialist.id
+        ).first()
+        
+        if not approval_data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No approval data found for this specialist"
+            )
+        
+        # Find the document
+        document = db.query(SpecialistDocuments).filter(
+            SpecialistDocuments.id == doc_uuid,
+            SpecialistDocuments.approval_data_id == approval_data.id
+        ).first()
+        
+        if not document:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found or does not belong to this specialist"
+            )
+        
+        # Delete the physical file if it exists
+        if os.path.exists(document.file_path):
+            try:
+                os.remove(document.file_path)
+                print(f"DEBUG: Physical file deleted: {document.file_path}")
+            except Exception as e:
+                print(f"DEBUG: Failed to delete physical file {document.file_path}: {str(e)}")
+                # Continue with database deletion even if file deletion fails
+        
+        # Get document info for response
+        doc_info = next((doc for doc in MANDATORY_DOCUMENTS if doc["type"] == document.document_type), None)
+        doc_label = doc_info["label"] if doc_info else document.document_type.value.replace('_', ' ').title()
+        
+        # Delete from database
+        db.delete(document)
+        db.commit()
+        
+        print(f"DEBUG: Document '{document.document_name}' deleted successfully for specialist {specialist.email}")
+        
+        return {
+            "message": f"Document '{doc_label}' deleted successfully",
+            "document_type": document.document_type.value,
+            "document_name": document.document_name
+        }
+        
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"Error deleting document for {specialist.email}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete document"
         )
 
 # ============================================================================
@@ -554,6 +833,15 @@ async def submit_documents(
         print(f"DEBUG: File size: {file.size} bytes")
         print(f"DEBUG: File type: {file.content_type}")
         print(f"DEBUG: Expiry date: {expiry_date}")
+        
+        # Validate document type is mandatory
+        print(f"DEBUG: Validating document type")
+        if document_type not in MANDATORY_DOCUMENT_TYPES:
+            available_types = [doc["label"] for doc in MANDATORY_DOCUMENTS]
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Document type '{document_type.value}' is not in the mandatory documents list. Please upload one of: {', '.join(available_types)}"
+            )
         
         # Validate file
         print(f"DEBUG: Validating uploaded file")
@@ -594,12 +882,9 @@ async def submit_documents(
                 background_check_status='pending'
             )
             db.add(approval_data)
-            db.flush()
-            print(f"DEBUG: New approval data created with ID: {approval_data.id}")
-        else:
-            print(f"DEBUG: Found existing approval data with ID: {approval_data.id}")
+            db.flush()  # Get the ID
         
-        # Check if document type already exists (replace if exists)
+        # Check for duplicate document type
         print(f"DEBUG: Checking for existing document of type: {document_type}")
         existing_doc = db.query(SpecialistDocuments).filter(
             SpecialistDocuments.approval_data_id == approval_data.id,
@@ -607,21 +892,12 @@ async def submit_documents(
         ).first()
         
         if existing_doc:
-            print(f"DEBUG: Found existing document with ID: {existing_doc.id}, replacing it")
-            # Delete old file if exists
-            if os.path.exists(existing_doc.file_path):
-                try:
-                    os.remove(existing_doc.file_path)
-                    print(f"DEBUG: Old file deleted: {existing_doc.file_path}")
-                except Exception as e:
-                    print(f"DEBUG: Failed to delete old file {existing_doc.file_path}: {str(e)}")
-            
-            # Delete existing record
-            db.delete(existing_doc)
-            db.flush()
-            print(f"DEBUG: Existing document record deleted")
-        else:
-            print(f"DEBUG: No existing document of this type found")
+            doc_info = next((doc for doc in MANDATORY_DOCUMENTS if doc["type"] == document_type), None)
+            doc_label = doc_info["label"] if doc_info else document_type.value.replace('_', ' ').title()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Document '{doc_label}' has already been uploaded. Please delete the existing document first if you want to replace it."
+            )
         
         # Save new file
         print(f"DEBUG: Saving uploaded file")
@@ -712,6 +988,253 @@ async def submit_documents(
         )
 
 # ============================================================================
+# SUBMIT FOR APPROVAL ENDPOINT
+# ============================================================================
+
+class SubmissionResponse(BaseModel):
+    """Response for application submission"""
+    success: bool
+    message: str
+    submission_date: datetime
+    approval_status: str
+    estimated_review_time: str
+    next_steps: List[str]
+
+@router.post(
+    "/submit-for-approval",
+    response_model=SubmissionResponse,
+    responses={
+        200: {"description": "Application submitted successfully"},
+        400: {"model": ErrorResponse, "description": "Profile incomplete or validation failed"},
+        403: {"model": ErrorResponse, "description": "Access denied or already submitted"},
+        500: {"model": ErrorResponse, "description": "Internal server error"}
+    }
+)
+async def submit_for_approval(
+    db: Session = Depends(get_db),
+    specialist: Specialists = Depends(get_authenticated_specialist)
+):
+    """Submit completed profile and documents for admin approval"""
+    try:
+        print(f"DEBUG: Submit for approval request from specialist: {specialist.email}")
+        
+        # Profile completion check removed - now handled in frontend
+        print(f"DEBUG: Profile completion check bypassed - validation handled in frontend")
+        
+        # Check availability slots
+        if not specialist.availability_slots or len(specialist.availability_slots) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="At least one availability slot must be selected before submitting for approval."
+            )
+        
+        # Check if all mandatory documents are uploaded
+        mandatory_docs = [DocumentTypeEnum.IDENTITY_CARD, DocumentTypeEnum.DEGREE, 
+                         DocumentTypeEnum.LICENSE, DocumentTypeEnum.EXPERIENCE_LETTER]
+        
+        approval_data = db.query(SpecialistsApprovalData).filter(
+            SpecialistsApprovalData.specialist_id == specialist.id
+        ).first()
+        
+        if not approval_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No documents uploaded. Please upload all required documents before submitting."
+            )
+        
+        uploaded_doc_types = [doc.document_type for doc in approval_data.documents]
+        missing_docs = [doc for doc in mandatory_docs if doc not in uploaded_doc_types]
+        
+        if missing_docs:
+            missing_doc_names = []
+            for doc_type in missing_docs:
+                if doc_type == DocumentTypeEnum.IDENTITY_CARD:
+                    missing_doc_names.append("Identity Card")
+                elif doc_type == DocumentTypeEnum.DEGREE:
+                    missing_doc_names.append("Degree Certificate") 
+                elif doc_type == DocumentTypeEnum.LICENSE:
+                    missing_doc_names.append("Professional License")
+                elif doc_type == DocumentTypeEnum.EXPERIENCE_LETTER:
+                    missing_doc_names.append("Experience Letter")
+            
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Missing required documents: {', '.join(missing_doc_names)}. Please upload all documents before submitting."
+            )
+        
+        # Check if already submitted for review
+        if specialist.approval_status == ApprovalStatusEnum.UNDER_REVIEW:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Application already submitted for review. Please wait for admin approval."
+            )
+        
+        if specialist.approval_status == ApprovalStatusEnum.APPROVED:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Application already approved. No need to resubmit."
+            )
+        
+        # Update specialist status to under review
+        specialist.approval_status = ApprovalStatusEnum.UNDER_REVIEW
+        specialist.updated_at = datetime.now(timezone.utc)
+        
+        # Update approval data submission date
+        approval_data.submission_date = datetime.now(timezone.utc)
+        approval_data.background_check_status = 'under_review'
+        
+        # Commit changes
+        db.commit()
+        print(f"DEBUG: Specialist {specialist.email} status updated to UNDER_REVIEW")
+        
+        # Send admin notification
+        admin_notified = notify_admins_application_submission(db, specialist)
+        
+        # Prepare response
+        next_steps = [
+            "Your application has been submitted for admin review",
+            "You will receive an email notification when review is complete",
+            "Estimated review time: 3-5 business days",
+            "You can log in to check your approval status",
+            "If approved, you'll gain access to the specialist dashboard"
+        ]
+        
+        return SubmissionResponse(
+            success=True,
+            message="Application submitted successfully for admin approval",
+            submission_date=datetime.now(timezone.utc),
+            approval_status="under_review",
+            estimated_review_time="3-5 business days",
+            next_steps=next_steps
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ERROR: Unexpected error during submission for {specialist.email}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An unexpected error occurred during submission: {str(e)}"
+        )
+
+@router.get(
+    "/approval-status",
+    responses={
+        200: {"description": "Approval status retrieved successfully"},
+        403: {"model": ErrorResponse, "description": "Access denied"},
+        500: {"model": ErrorResponse, "description": "Internal server error"}
+    }
+)
+async def get_approval_status(
+    db: Session = Depends(get_db),
+    specialist: Specialists = Depends(get_authenticated_specialist)
+):
+    """Get current approval status and profile completion information"""
+    try:
+        print(f"DEBUG: Approval status check for specialist: {specialist.email}")
+        
+        # Profile completion calculation removed - now handled in frontend
+        
+        # Check document submission status
+        approval_data = db.query(SpecialistsApprovalData).filter(
+            SpecialistsApprovalData.specialist_id == specialist.id
+        ).first()
+        
+        documents_uploaded = 0
+        if approval_data:
+            documents_uploaded = len(approval_data.documents)
+        
+        # Determine next action based on status
+        next_action = "unknown"
+        redirect_to = "/"
+        
+        if specialist.approval_status == ApprovalStatusEnum.PENDING:
+            # Since profile completion is now handled in frontend, 
+            # we only check documents for the next action
+            if documents_uploaded < 4:
+                next_action = "upload_documents" 
+                redirect_to = "/complete-profile?tab=documents"
+            else:
+                next_action = "submit_for_approval"
+                redirect_to = "/complete-profile?tab=documents"
+        elif specialist.approval_status == ApprovalStatusEnum.UNDER_REVIEW:
+            next_action = "pending_approval"
+            redirect_to = "/pending-approval"
+        elif specialist.approval_status == ApprovalStatusEnum.APPROVED:
+            next_action = "access_dashboard"
+            redirect_to = "/specialist-dashboard"
+        elif specialist.approval_status == ApprovalStatusEnum.REJECTED:
+            next_action = "application_rejected"
+            redirect_to = "/application-rejected"
+        
+        return {
+            "approval_status": specialist.approval_status.value,
+            "profile_completion_percentage": 100,  # Always 100% since validation is in frontend
+            "missing_fields": [],  # No missing fields since validation is in frontend
+            "documents_uploaded": documents_uploaded,
+            "documents_required": 4,
+            "next_action": next_action,
+            "redirect_to": redirect_to,
+            "submission_date": approval_data.submission_date if approval_data else None,
+            "can_access_dashboard": specialist.approval_status == ApprovalStatusEnum.APPROVED
+        }
+        
+    except Exception as e:
+        print(f"ERROR: Failed to get approval status for {specialist.email}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve approval status"
+        )
+
+def notify_admins_application_submission(db: Session, specialist: Specialists) -> bool:
+    """Notify admins about new specialist application submission"""
+    try:
+        print(f"DEBUG: Sending admin notification for application submission: {specialist.email}")
+        
+        # Get admin emails
+        admin_emails = get_admin_emails_for_notifications(db)
+        if not admin_emails:
+            print("WARNING: No admin emails found for notifications")
+            return False
+        
+        # Get primary specialization
+        primary_spec = None
+        if specialist.specializations:
+            primary_spec = next((spec for spec in specialist.specializations if spec.is_primary_specialization), None)
+        
+        specialization_name = safe_enum_to_string(primary_spec.specialization) if primary_spec else "Mental Health Specialist"
+        
+        # Send enhanced admin notification email to each admin
+        success_count = 0
+        for admin_email in admin_emails:
+            try:
+                email_sent = send_admin_specialist_registration_notification(
+                    admin_email=admin_email,
+                    specialist_email=specialist.email,
+                    first_name=specialist.first_name,
+                    last_name=specialist.last_name,
+                    specialization=specialization_name,
+                    registration_date=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+                )
+                if email_sent:
+                    success_count += 1
+                    print(f"DEBUG: Admin notification sent successfully to {admin_email}")
+                else:
+                    print(f"WARNING: Failed to send admin notification to {admin_email}")
+            except Exception as e:
+                print(f"ERROR: Failed to send admin notification to {admin_email}: {str(e)}")
+        
+        # Return True if at least one email was sent successfully
+        return success_count > 0
+        
+    except Exception as e:
+        print(f"ERROR: Failed to send admin notification for {specialist.email}: {str(e)}")
+        return False
+
+# ============================================================================
 # EXPORTS
 # ============================================================================
 
@@ -719,8 +1242,11 @@ __all__ = [
     "router",
     "complete_profile",
     "submit_documents",
+    "submit_for_approval",
+    "get_approval_status",
     "ProfileCompletionRequest",
     "DocumentSubmissionRequest",
+    "SubmissionResponse",
     "ProfileCompletionResponse",
     "DocumentSubmissionResponse"
 ]
