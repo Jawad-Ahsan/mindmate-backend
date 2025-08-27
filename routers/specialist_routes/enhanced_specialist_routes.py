@@ -222,7 +222,8 @@ async def update_appointment_status(
         valid_transitions = {
             AppointmentStatusEnum.PENDING_APPROVAL: [
                 AppointmentStatusEnum.SCHEDULED,
-                AppointmentStatusEnum.CONFIRMED
+                AppointmentStatusEnum.CONFIRMED,
+                AppointmentStatusEnum.CANCELLED
             ],
             AppointmentStatusEnum.SCHEDULED: [
                 AppointmentStatusEnum.CONFIRMED,

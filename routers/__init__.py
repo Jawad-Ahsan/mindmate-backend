@@ -39,6 +39,7 @@ from .registeration.register import router as registeration_router
 from .registeration.register_patient import router as minimal_patient_registration_router
 from .registeration.verify_email import router as email_verification_router
 from .authentication.authenticate import router as user_auth_router
+from .authentication.password_reset import router as password_reset_router
 from .specialist_routes.complete_profile import router as profile_completion_router
 from .specialist_routes.specialists_sma_routes import router as specialists_sma_router
 from .specialist_routes.enhanced_specialist_routes import router as enhanced_specialist_router
@@ -61,6 +62,7 @@ router.include_router(minimal_patient_registration_router)
 router.include_router(email_verification_router)
 
 router.include_router(user_auth_router)
+router.include_router(password_reset_router)
 
 router.include_router(profile_completion_router)
 router.include_router(specialists_sma_router)
