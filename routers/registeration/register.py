@@ -16,7 +16,7 @@ import bcrypt
 # Import database models
 from models.sql_models.patient_models import (
     Patient, PatientAuthInfo, PatientPreferences, 
-    RecordStatusEnum, LanguageEnum, GenderEnum
+    RecordStatusEnum, LanguageEnum, GenderEnum, ConsultationModeEnum, UrgencyLevelEnum
 )
 from models.sql_models.specialist_models import (
     Specialists, SpecialistsAuthInfo, SpecialistsApprovalData,
@@ -152,18 +152,11 @@ def create_default_patient_preferences(patient_id: str) -> PatientPreferences:
     """Create default preferences for new patient"""
     return PatientPreferences(
         patient_id=patient_id,
-        location_preferences={'consultation_mode': 'virtual'},
-        cultural_preferences={'language_preference': 'urdu'},
-        therapy_preferences={'session_duration': 60, 'frequency': 'weekly'},
-        financial_preferences={'max_budget': 5000.0},
-        specialist_preferences={'min_rating': 4.0, 'min_experience': 3},
-        availability_preferences={'urgency': 'standard'},
-        priority_weights={
-            'cultural_fit': 0.25, 'clinical_match': 0.20, 'location': 0.15,
-            'cost': 0.15, 'availability': 0.10, 'ratings': 0.08, 'experience': 0.07
-        },
-        consultation_mode='virtual',
-        urgency_level='standard'
+        consultation_mode=ConsultationModeEnum.VIRTUAL,
+        urgency_level=UrgencyLevelEnum.STANDARD,
+        max_budget=5000.0,
+        notes="Default preferences created during registration",
+        is_active=True
     )
 
 # ============================================================================

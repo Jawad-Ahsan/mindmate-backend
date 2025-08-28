@@ -165,7 +165,8 @@ class ForumQuestion(Base, SQLBaseModel):
     # Relationships
     forum = relationship("Forum", back_populates="questions")
     answers = relationship("ForumAnswer", back_populates="question", cascade="all, delete-orphan", lazy="dynamic")
-    patient = relationship("Patient", back_populates="forum_questions")     
+    patient = relationship("Patient", back_populates="forum_questions")
+    bookmarks = relationship("ForumBookmark", back_populates="question", cascade="all, delete-orphan", lazy="dynamic")
     
     # ============================================================================
     # PROPERTIES
@@ -395,6 +396,127 @@ class ForumAnswer(Base, SQLBaseModel):
         return f"<ForumAnswer(question_id={self.question_id}, specialist_id={self.specialist_id}, {self.status.value})>"
 
 # ============================================================================
+# FORUM BOOKMARKS TABLE
+# ============================================================================
+
+class ForumBookmark(Base, SQLBaseModel):
+    """
+    Forum Bookmarks - Bookmarks created by patients for questions
+    """
+    __tablename__ = "forum_bookmarks"
+    
+    __table_args__ = (
+        Index('idx_forum_bookmark_patient', 'patient_id'),
+        Index('idx_forum_bookmark_question', 'question_id'),
+        Index('idx_forum_bookmark_created', 'created_at'),
+        {'extend_existing': True}
+    )
+
+    # Foreign Keys
+    patient_id = Column(UUID(as_uuid=True), ForeignKey("patients.id"), nullable=False, index=True)
+    question_id = Column(UUID(as_uuid=True), ForeignKey("forum_questions.id"), nullable=False, index=True)
+    
+    # Bookmark Details
+    created_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    
+    # Relationships
+    patient = relationship("Patient", back_populates="forum_bookmarks")
+    question = relationship("ForumQuestion", back_populates="bookmarks")
+    
+    # ============================================================================
+    # PROPERTIES
+    # ============================================================================
+    
+    @hybrid_property
+    def is_bookmarked(self) -> bool:
+        return True # A bookmark exists, so it's bookmarked
+    
+    def __repr__(self) -> str:
+        return f"<ForumBookmark(patient_id={self.patient_id}, question_id={self.question_id})>"
+
+# ============================================================================
+# FORUM REPORTS TABLE
+# ============================================================================
+
+class ForumReport(Base, SQLBaseModel):
+    """
+    Forum Reports - Reports submitted by users for questions or answers
+    """
+    __tablename__ = "forum_reports"
+    
+    __table_args__ = (
+        Index('idx_forum_report_reporter', 'reporter_id'),
+        Index('idx_forum_report_post', 'post_id', 'post_type'),
+        Index('idx_forum_report_status', 'status'),
+        Index('idx_forum_report_created', 'created_at'),
+        {'extend_existing': True}
+    )
+
+    # Foreign Keys
+    reporter_id = Column(UUID(as_uuid=True), ForeignKey("patients.id", ondelete='CASCADE'), nullable=True, index=True)
+    specialist_reporter_id = Column(UUID(as_uuid=True), ForeignKey("specialists.id", ondelete='CASCADE'), nullable=True, index=True)
+    
+    # Report Details
+    post_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # ID of reported question or answer
+    post_type = Column(String(20), nullable=False, index=True)  # "question" or "answer"
+    reason = Column(Text, nullable=True)  # Optional reason for reporting
+    
+    # Status
+    status = Column(String(20), default="pending", index=True)  # "pending", "resolved", "removed"
+    
+    # Moderation
+    moderated_by = Column(UUID(as_uuid=True), nullable=True)  # Admin who processed the report
+    moderated_at = Column(DateTime(timezone=True), nullable=True)
+    moderation_notes = Column(Text, nullable=True)
+    
+    # Relationships
+    reporter_patient = relationship("Patient", foreign_keys=[reporter_id])
+    reporter_specialist = relationship("Specialists", foreign_keys=[specialist_reporter_id])
+    
+    # ============================================================================
+    # PROPERTIES
+    # ============================================================================
+    
+    @property
+    def reporter_name(self) -> str:
+        """Get reporter name based on type"""
+        if self.reporter_patient:
+            return f"{self.reporter_patient.first_name} {self.reporter_patient.last_name}"
+        elif self.reporter_specialist:
+            return f"{self.reporter_specialist.first_name} {self.reporter_specialist.last_name}"
+        return "Unknown"
+    
+    @property
+    def reporter_type(self) -> str:
+        """Get reporter type"""
+        if self.reporter_patient:
+            return "patient"
+        elif self.reporter_specialist:
+            return "specialist"
+        return "unknown"
+    
+    # ============================================================================
+    # BUSINESS LOGIC METHODS
+    # ============================================================================
+    
+    def mark_resolved(self, admin_id: str, notes: str = None) -> None:
+        """Mark report as resolved"""
+        self.status = "resolved"
+        self.moderated_by = admin_id
+        self.moderated_at = datetime.now(timezone.utc)
+        self.moderation_notes = notes
+    
+    def mark_removed(self, admin_id: str, notes: str = None) -> None:
+        """Mark report as removed (post was deleted)"""
+        self.status = "removed"
+        self.moderated_by = admin_id
+        self.moderated_at = datetime.now(timezone.utc)
+        self.moderation_notes = notes
+    
+    def __repr__(self) -> str:
+        return f"<ForumReport({self.post_type}, {self.status}, {self.reporter_name})>"
+
+# ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
 
@@ -589,6 +711,8 @@ __all__ = [
     "Forum",
     "ForumQuestion",
     "ForumAnswer",
+    "ForumBookmark",
+    "ForumReport",
     
     # Utility Functions
     "validate_patient_for_forum",
@@ -598,85 +722,3 @@ __all__ = [
     "create_specialist_forum_profile",
     "setup_forum_relationships",
 ]
-
-# ============================================================================
-# FORUM REPORTS TABLE
-# ============================================================================
-
-class ForumReport(Base, SQLBaseModel):
-    """
-    Forum Reports - Reports submitted by users for questions or answers
-    """
-    __tablename__ = "forum_reports"
-    
-    __table_args__ = (
-        Index('idx_forum_report_reporter', 'reporter_id'),
-        Index('idx_forum_report_post', 'post_id', 'post_type'),
-        Index('idx_forum_report_status', 'status'),
-        Index('idx_forum_report_created', 'created_at'),
-        {'extend_existing': True}
-    )
-
-    # Foreign Keys
-    reporter_id = Column(UUID(as_uuid=True), ForeignKey("patients.id", ondelete='CASCADE'), nullable=True, index=True)
-    specialist_reporter_id = Column(UUID(as_uuid=True), ForeignKey("specialists.id", ondelete='CASCADE'), nullable=True, index=True)
-    
-    # Report Details
-    post_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # ID of reported question or answer
-    post_type = Column(String(20), nullable=False, index=True)  # "question" or "answer"
-    reason = Column(Text, nullable=True)  # Optional reason for reporting
-    
-    # Status
-    status = Column(String(20), default="pending", index=True)  # "pending", "resolved", "removed"
-    
-    # Moderation
-    moderated_by = Column(UUID(as_uuid=True), nullable=True)  # Admin who processed the report
-    moderated_at = Column(DateTime(timezone=True), nullable=True)
-    moderation_notes = Column(Text, nullable=True)
-    
-    # Relationships
-    reporter_patient = relationship("Patient", foreign_keys=[reporter_id])
-    reporter_specialist = relationship("Specialists", foreign_keys=[specialist_reporter_id])
-    
-    # ============================================================================
-    # PROPERTIES
-    # ============================================================================
-    
-    @property
-    def reporter_name(self) -> str:
-        """Get reporter name based on type"""
-        if self.reporter_patient:
-            return f"{self.reporter_patient.first_name} {self.reporter_patient.last_name}"
-        elif self.reporter_specialist:
-            return f"{self.reporter_specialist.first_name} {self.reporter_specialist.last_name}"
-        return "Unknown"
-    
-    @property
-    def reporter_type(self) -> str:
-        """Get reporter type"""
-        if self.reporter_patient:
-            return "patient"
-        elif self.reporter_specialist:
-            return "specialist"
-        return "unknown"
-    
-    # ============================================================================
-    # BUSINESS LOGIC METHODS
-    # ============================================================================
-    
-    def mark_resolved(self, admin_id: str, notes: str = None) -> None:
-        """Mark report as resolved"""
-        self.status = "resolved"
-        self.moderated_by = admin_id
-        self.moderated_at = datetime.now(timezone.utc)
-        self.moderation_notes = notes
-    
-    def mark_removed(self, admin_id: str, notes: str = None) -> None:
-        """Mark report as removed (post was deleted)"""
-        self.status = "removed"
-        self.moderated_by = admin_id
-        self.moderated_at = datetime.now(timezone.utc)
-        self.moderation_notes = notes
-    
-    def __repr__(self) -> str:
-        return f"<ForumReport({self.post_type}, {self.status}, {self.reporter_name})>"

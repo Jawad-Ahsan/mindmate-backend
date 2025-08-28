@@ -218,6 +218,9 @@ async def create_forum_question(
 async def get_forum_questions(
     category: Optional[QuestionCategory] = None,
     status: Optional[QuestionStatus] = None,
+    patient_id: Optional[str] = None,
+    bookmarked: Optional[bool] = None,
+    needs_moderation: Optional[bool] = None,
     limit: int = 20,
     offset: int = 0,
     db: Session = Depends(get_db)
@@ -231,6 +234,29 @@ async def get_forum_questions(
         
         if status:
             query = query.filter(ForumQuestion.status == status)
+        
+        # Filter by patient (for "My Questions")
+        if patient_id:
+            try:
+                patient_uuid = uuid.UUID(patient_id)
+                query = query.filter(ForumQuestion.patient_id == patient_uuid)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid patient ID format"
+                )
+        
+        # Filter bookmarked questions
+        if bookmarked:
+            from models.sql_models.forum_models import ForumBookmark
+            bookmarked_question_ids = db.query(ForumBookmark.question_id).filter(
+                ForumBookmark.patient_id == patient_id if patient_id else True
+            ).subquery()
+            query = query.filter(ForumQuestion.id.in_(bookmarked_question_ids))
+        
+        # Filter questions that need moderation
+        if needs_moderation:
+            query = query.filter(ForumQuestion.is_flagged == True)
         
         questions = query.order_by(ForumQuestion.created_at.desc()).offset(offset).limit(limit).all()
         
@@ -644,6 +670,279 @@ async def delete_forum_answer(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete answer: {str(e)}"
         )
+
+# ============================================================================
+# BOOKMARK ENDPOINTS
+# ============================================================================
+
+@router.post("/questions/{question_id}/bookmark")
+async def bookmark_question(
+    question_id: str,
+    current_user_data: dict = Depends(get_current_user_from_token),
+    db: Session = Depends(get_db)
+):
+    """Bookmark a question for the current patient"""
+    try:
+        user = current_user_data["user"]
+        user_type = current_user_data["user_type"]
+        
+        # Only patients can bookmark questions
+        if user_type != "patient":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only patients can bookmark questions"
+            )
+        
+        # Check if question exists
+        question = db.query(ForumQuestion).filter(
+            ForumQuestion.id == question_id,
+            ForumQuestion.is_deleted == False
+        ).first()
+        
+        if not question:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Question not found"
+            )
+        
+        # Check if already bookmarked
+        from models.sql_models.forum_models import ForumBookmark
+        existing_bookmark = db.query(ForumBookmark).filter(
+            ForumBookmark.patient_id == user.id,
+            ForumBookmark.question_id == question_id
+        ).first()
+        
+        if existing_bookmark:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Question is already bookmarked"
+            )
+        
+        # Create bookmark
+        new_bookmark = ForumBookmark(
+            patient_id=user.id,
+            question_id=question_id
+        )
+        
+        db.add(new_bookmark)
+        db.commit()
+        
+        return {"message": "Question bookmarked successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to bookmark question: {str(e)}"
+        )
+
+@router.delete("/questions/{question_id}/bookmark")
+async def unbookmark_question(
+    question_id: str,
+    current_user_data: dict = Depends(get_current_user_from_token),
+    db: Session = Depends(get_db)
+):
+    """Remove bookmark from a question"""
+    try:
+        user = current_user_data["user"]
+        user_type = current_user_data["user_type"]
+        
+        # Only patients can unbookmark questions
+        if user_type != "patient":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only patients can unbookmark questions"
+            )
+        
+        # Find and delete bookmark
+        from models.sql_models.forum_models import ForumBookmark
+        bookmark = db.query(ForumBookmark).filter(
+            ForumBookmark.patient_id == user.id,
+            ForumBookmark.question_id == question_id
+        ).first()
+        
+        if not bookmark:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Bookmark not found"
+            )
+        
+        db.delete(bookmark)
+        db.commit()
+        
+        return {"message": "Bookmark removed successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to remove bookmark: {str(e)}"
+        )
+
+@router.get("/questions/{question_id}/bookmark")
+async def check_bookmark_status(
+    question_id: str,
+    current_user_data: dict = Depends(get_current_user_from_token),
+    db: Session = Depends(get_db)
+):
+    """Check if a question is bookmarked by the current user"""
+    try:
+        user = current_user_data["user"]
+        user_type = current_user_data["user_type"]
+        
+        # Only patients can check bookmark status
+        if user_type != "patient":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only patients can check bookmark status"
+            )
+        
+        # Check if bookmarked
+        from models.sql_models.forum_models import ForumBookmark
+        bookmark = db.query(ForumBookmark).filter(
+            ForumBookmark.patient_id == user.id,
+            ForumBookmark.question_id == question_id
+        ).first()
+        
+        return {"is_bookmarked": bookmark is not None}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to check bookmark status: {str(e)}"
+        )
+
+# ============================================================================
+# MODERATION ENDPOINTS
+# ============================================================================
+
+@router.get("/moderation/queue")
+async def get_moderation_queue(
+    current_user_data: dict = Depends(get_current_user_from_token),
+    db: Session = Depends(get_db)
+):
+    """Get questions that need moderation (admin/moderator only)"""
+    try:
+        user = current_user_data["user"]
+        user_type = current_user_data["user_type"]
+        
+        # Only admins and moderators can access moderation queue
+        if user_type not in ["admin", "moderator"]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied. Admin or moderator privileges required."
+            )
+        
+        # Get flagged questions
+        flagged_questions = db.query(ForumQuestion).filter(
+            ForumQuestion.is_flagged == True,
+            ForumQuestion.is_deleted == False
+        ).order_by(ForumQuestion.moderated_at.desc()).all()
+        
+        response_data = []
+        for question in flagged_questions:
+            # Get author name (handle anonymous case)
+            if question.is_anonymous:
+                author_name = "Anonymous"
+            else:
+                patient = db.query(Patient).filter(Patient.id == question.patient_id).first()
+                author_name = f"{patient.first_name} {patient.last_name}" if patient else "Unknown"
+            
+            response_data.append(ForumQuestionResponse(
+                id=str(question.id),
+                title=question.title,
+                content=question.content,
+                category=question.category.value,
+                author_id=str(question.patient_id),
+                author_name=author_name,
+                is_anonymous=question.is_anonymous,
+                is_urgent=question.is_urgent,
+                status=question.status.value,
+                asked_at=question.created_at,
+                formatted_date=question.created_at.strftime("%B %d, %Y at %I:%M %p"),
+                time_ago=get_time_ago(question.created_at),
+                answers_count=question.answer_count,
+                views_count=question.view_count,
+                is_active=not question.is_deleted
+            ))
+        
+        return response_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch moderation queue: {str(e)}"
+        )
+
+@router.post("/questions/{question_id}/moderate")
+async def moderate_question(
+    question_id: str,
+    action: str,  # "approve", "remove", "flag"
+    reason: Optional[str] = None,
+    current_user_data: dict = Depends(get_current_user_from_token),
+    db: Session = Depends(get_db)
+):
+    """Moderate a question (admin/moderator only)"""
+    try:
+        user = current_user_data["user"]
+        user_type = current_user_data["user_type"]
+        
+        # Only admins and moderators can moderate
+        if user_type not in ["admin", "moderator"]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied. Admin or moderator privileges required."
+            )
+        
+        # Get question
+        question = db.query(ForumQuestion).filter(
+            ForumQuestion.id == question_id,
+            ForumQuestion.is_deleted == False
+        ).first()
+        
+        if not question:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Question not found"
+            )
+        
+        # Apply moderation action
+        if action == "approve":
+            question.unflag_question()
+        elif action == "remove":
+            question.soft_delete()
+        elif action == "flag":
+            question.flag_question(reason or "Flagged by moderator", user.id)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid action. Must be 'approve', 'remove', or 'flag'"
+            )
+        
+        db.commit()
+        
+        return {"message": f"Question {action}ed successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to moderate question: {str(e)}"
+        )
+
+# ============================================================================
+# REPORTS ENDPOINT
+# ============================================================================
 
 @router.post("/reports", response_model=ForumReportResponse)
 async def create_forum_report(

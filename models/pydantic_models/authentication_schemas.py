@@ -54,7 +54,9 @@ class PatientRegisterRequest(BaseAuthModel):
     # Required demographic info
     date_of_birth: date
     gender: GenderEnum
-    city: str = Field(min_length=2, max_length=100)
+    
+    # Optional demographic info
+    city: Optional[str] = Field(None, min_length=2, max_length=100)
         
     # Terms acceptance
     accepts_terms_and_conditions: bool = True

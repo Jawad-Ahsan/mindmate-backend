@@ -50,6 +50,7 @@ from .journal import router as journal_router
 from .forum import router as forum_router
 from .admin import router as admin_router
 from .agents_routes.sma_router import router as sma_router
+from .chatbot_routes import router as chatbot_router
 
 # Create main auth router
 router = APIRouter()
@@ -74,6 +75,7 @@ router.include_router(journal_router)
 router.include_router(forum_router)
 router.include_router(admin_router)
 router.include_router(sma_router)
+router.include_router(chatbot_router)
 
 # router.include_router(patient_authentication_router)
 # router.include_router(admin_router)            # Creates "auth" tag

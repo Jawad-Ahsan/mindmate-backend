@@ -158,6 +158,7 @@ class Patient(Base, SQLAlchemyBaseModel):
     risk_assessments = relationship("PatientRiskAssessment", back_populates="patient", cascade="all, delete-orphan")
     
     forum_questions = relationship("ForumQuestion", back_populates="patient", lazy="dynamic", cascade="all, delete-orphan")
+    forum_bookmarks = relationship("ForumBookmark", back_populates="patient", lazy="dynamic", cascade="all, delete-orphan")
     
     # New relationships for journal and forum
     journal_entries = relationship("JournalEntry", back_populates="patient", cascade="all, delete-orphan")
