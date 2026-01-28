@@ -224,8 +224,11 @@ class Specialists(Base, SQLBaseModel):
     @validates('phone')
     def validate_phone(self, key, phone):
         # Phone is now optional during registration, only validate format if provided
-        if phone and not re.match(r'^\+?92[0-9]{10}$', phone):
-            raise ValueError("Phone must be in Pakistani format: +92XXXXXXXXXX")
+        if phone:
+            # Strip whitespace and common separators
+            phone = phone.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+            if not re.match(r'^(?:\+?92|0)3\d{9}$', phone):
+                raise ValueError("Phone must be in Pakistani format: +92XXXXXXXXXX or 03XXXXXXXXX")
         return phone
 
     @validates('years_experience')

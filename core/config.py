@@ -44,6 +44,19 @@ class Settings(BaseSettings):
     DB_TIMEOUT: int = 30
     DB_POOL_PRE_PING: bool = True
     DB_ECHO: bool = False
+    # Admin & Super Admin Settings
+    ADMIN_REGISTRATION_KEY: str = "MindMateAdminKey#2025"
+    ADMIN_REGISTRATION_KEY_HASH: str = "1fba75e9accc479fd9ac1123410b96e8fbc6219ff66bcb4e8c26402f46ae94a6"
+    
+    SUPER_ADMIN_FIRST_NAME: str = "Hammad"
+    SUPER_ADMIN_LAST_NAME: str = "Munir"
+    SUPER_ADMIN_EMAIL: str
+    SUPER_ADMIN_PASSWORD: str
+    
+    # Google OAuth2 Settings
+    GOOGLE_CLIENT_ID: Optional[str] = None
+    GOOGLE_CLIENT_SECRET: Optional[str] = None
+    GOOGLE_REDIRECT_URI: Optional[str] = None
     
     # Redis Settings
     REDIS_HOST: str = "localhost"

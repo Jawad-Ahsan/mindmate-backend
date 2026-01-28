@@ -70,11 +70,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     error_details = []
     for error in exc.errors():
         field = " -> ".join(str(loc) for loc in error["loc"])
-        # Extract the actual error message safely
-        if error.get("ctx") and hasattr(error["ctx"]["error"], "args"):
-            message = str(error["ctx"]["error"])
-        else:
-            message = error.get("msg", "Validation error")
+        message = error.get("msg", "Validation error")
         error_details.append(f"{field}: {message}")
     
     return JSONResponse(

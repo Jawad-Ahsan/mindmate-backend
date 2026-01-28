@@ -158,103 +158,113 @@ class LLMClient:
     
     def __init__(self, model: str = None, enable_cache: bool = True):
         """
-        Initialize the enhanced LLM client.
-        
-        Args:
-            model: The model to use (if None, will use GROQ_MODEL from .env or default)
-            enable_cache: Whether to enable response caching
+        Initialize the enhanced LLM client with multi-provider support.
+        Prioritizes Gemini, falls back to Groq.
         """
-        self.api_key = os.getenv("GROQ_API_KEY")
-        if not self.api_key:
-            raise ValueError("GROQ_API_KEY environment variable is required")
+        # Load configurations
+        self.cerebras_key = os.getenv("CEREBRAS_API_KEY")
+        self.cerebras_model = os.getenv("CEREBRAS_MODEL", "llama3.1-70b")
+        self.cerebras_base_url = os.getenv("CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1")
         
-        # Get model from environment variable or use provided model or default
-        if model is None:
-            self.model = os.getenv("GROQ_MODEL")
-        else:
-            self.model = model
-        self.base_url = "https://api.groq.com/openai/v1"
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
+        self.groq_key = os.getenv("GROQ_API_KEY")
+        self.groq_model = os.getenv("GROQ_MODEL", "llama3-8b-8192")
+        self.groq_base_url = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+        
+        self.active_provider = "cerebras" # Default to Cerebras
+        self.model = self.cerebras_model
+        
+        self.client_config = {
+            "cerebras": {
+                "key": self.cerebras_key,
+                "base_url": self.cerebras_base_url,
+                "model": self.cerebras_model,
+                "headers": {"Authorization": f"Bearer {self.cerebras_key}", "Content-Type": "application/json"}
+            },
+            "groq": {
+                "key": self.groq_key,
+                "base_url": self.groq_base_url,
+                "model": self.groq_model,
+                "headers": {"Authorization": f"Bearer {self.groq_key}", "Content-Type": "application/json"}
+            }
         }
-        
+
         # Initialize components
-        self.circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=120)
-        self.request_queue = RequestQueue(max_requests_per_minute=6, max_concurrent=1)  # Very conservative
+        self.circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
+        self.request_queue = RequestQueue(max_requests_per_minute=15, max_concurrent=2) 
         self.cache = ResponseCache(max_size=50, ttl_seconds=1800) if enable_cache else None
         
-        # Model configuration
+        # Initial Connection Verification
+        if not self._verify_connection():
+            logger.warning("Primary provider (Cerebras) failed. Attempting fallback to Groq...")
+            if self._switch_provider("groq"):
+                logger.info("Successfully fell back to Groq")
+            else:
+                logger.error("All AI providers failed to connect.")
+                
         self.max_context_length = self._get_model_context_limit()
+
+    def _switch_provider(self, provider_name: str) -> bool:
+        """Switch active provider"""
+        if provider_name not in self.client_config:
+            return False
+            
+        config = self.client_config[provider_name]
+        if not config["key"]:
+            logger.warning(f"Cannot switch to {provider_name}: API Key missing")
+            return False
+            
+        self.active_provider = provider_name
+        self.model = config["model"]
+        logger.info(f"Switched active provider to: {provider_name}")
         
-        # Verify connection
-        self._verify_connection()
-    
+        # Verify new provider
+        return self._verify_connection()
+
     def _get_model_context_limit(self) -> int:
         """Get context limit for the model"""
         context_limits = {
-            "mixtral-8x7b-32768": 32768,
-            "llama2-70b-4096": 4096,
-            "gemma-7b-it": 8192,
-            "mistral-saba-24b": 8192,
-            "qwen/qwen3-32b": 32768,
-            "qwen/qwen-2.5-72b-instruct": 32768,
-            "qwen/qwen-2.5-coder-32b-instruct": 32768,
+            "gemini-1.5-pro": 1000000, # 1M tokens
+            "gemini-1.0-pro": 30000,
+            "gemini-2.0-flash": 1000000,
             "llama3-8b-8192": 8192,
             "llama3-70b-8192": 8192,
-            "llama-3.3-70b-versatile": 32768,
-            "moonshotai/kimi-k2-instruct": 32768,
-            "whisper-large-v3": 8192
+            "llama3.1-70b": 8192, # Cerebras
+            "llama3.1-8b": 8192,  # Cerebras
+            "mixtral-8x7b-32768": 32768,
         }
-        return context_limits.get(self.model, 8192)  # Default to 8192
-    
+        # Fuzzy match if exact model not found
+        for key, limit in context_limits.items():
+            if key in self.model:
+                return limit
+        return 8192
+
     def _estimate_tokens(self, text: str) -> int:
         """Estimate token count (rough approximation: 1 token ≈ 4 characters)"""
         return max(1, len(text) // 4)
     
     def _verify_connection(self) -> bool:
-        """Verify API connection with retry logic"""
-        max_retries = 3
-        
-        for attempt in range(max_retries):
-            try:
-                response = requests.get(f"{self.base_url}/models", headers=self.headers, timeout=10)
-                response.raise_for_status()
-                
-                models = response.json()
-                available_models = [model['id'] for model in models.get('data', [])]
-                
-                if self.model not in available_models:
-                    logger.warning(f"Model {self.model} not found in available models.")
-                    logger.info(f"Available models: {available_models}")
-                    
-                    # Try to find a suitable alternative
-                    qwen_alternatives = [m for m in available_models if 'qwen' in m.lower()]
-                    llama_alternatives = [m for m in available_models if 'llama' in m.lower()]
-                    
-                    if qwen_alternatives:
-                        self.model = qwen_alternatives[0]
-                        logger.info(f"Switched to Qwen alternative: {self.model}")
-                    elif llama_alternatives:
-                        self.model = llama_alternatives[0]
-                        logger.info(f"Switched to Llama alternative: {self.model}")
-                    elif available_models:
-                        self.model = available_models[0]
-                        logger.info(f"Switched to first available model: {self.model}")
-                    else:
-                        raise ValueError("No models available from API")
-                
-                logger.info(f"Connected to Groq API successfully. Using model: {self.model}")
+        """Verify API connection for active provider"""
+        config = self.client_config[self.active_provider]
+        if not config["key"]:
+            logger.warning(f"Missing API Key for {self.active_provider}")
+            return False
+
+        try:
+            # OpenAI Compatible Verification (Cerebras & Groq)
+            # Cerebras and Groq use standard /chat/completions or /models
+            url = f"{config['base_url'].rstrip('/')}/models"
+            response = requests.get(url, headers=config["headers"], timeout=10)
+            
+            if response.status_code == 200:
+                logger.info(f"Connected to {self.active_provider} successfully.")
                 return True
+            else:
+                logger.warning(f"{self.active_provider} connection failed: {response.status_code} - {response.text[:200]}")
+                return False
                 
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 5
-                    logger.warning(f"Connection attempt {attempt + 1} failed, retrying in {wait_time}s: {e}")
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"Failed to connect to Groq API after {max_retries} attempts: {e}")
-                    raise
+        except Exception as e:
+            logger.warning(f"{self.active_provider} connection error: {e}")
+            return False
     
     def _truncate_payload(self, messages: List[Dict], max_tokens: int) -> List[Dict]:
         """Intelligently truncate payload to fit within limits"""
@@ -299,7 +309,9 @@ class LLMClient:
         
         logger.info(f"Truncated to {len(truncated)} messages")
         return truncated
-    
+
+   
+
     def _make_request_with_protection(
         self,
         messages: List[Dict[str, str]],
@@ -309,7 +321,7 @@ class LLMClient:
         timeout: int = 120,
         **kwargs
     ) -> str:
-        """Make protected API request with all safety measures"""
+        """Make protected API request with automatic fallback"""
         
         # Truncate payload if necessary
         messages = self._truncate_payload(messages, max_tokens)
@@ -333,35 +345,70 @@ class LLMClient:
         self.request_queue.acquire_slot()
         
         try:
-            # Prepare payload
-            payload = {
-                "model": self.model,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "top_p": top_p,
-                "stream": False,
-                **kwargs
-            }
-            
             # Make request through circuit breaker
             def api_call():
-                response = requests.post(
-                    f"{self.base_url}/chat/completions",
-                    headers=self.headers,
-                    json=payload,
-                    timeout=timeout
-                )
-                response.raise_for_status()
-                return response.json()
+                try:
+                    # Standard OpenAI Logic (Cerebras, Groq, etc)
+                    current_config = self.client_config[self.active_provider]
+                    url = f"{current_config['base_url'].rstrip('/')}/chat/completions"
+                    
+                    payload = {
+                        "model": self.model,
+                        "messages": messages,
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                        "top_p": top_p,
+                        "stream": False,
+                        **kwargs
+                    }
+                    
+                    response = requests.post(
+                        url,
+                        headers=current_config["headers"],
+                        json=payload,
+                        timeout=timeout
+                    )
+                    
+                    if response.status_code in [401, 403, 429] or response.status_code >= 500:
+                        raise requests.exceptions.HTTPError(f"Provider failure: {response.status_code}")
+                        
+                    response.raise_for_status()
+                    result = response.json()
+                    if 'choices' not in result or not result['choices']:
+                        raise ValueError("No response choices returned from API")
+                    return result['choices'][0]['message']['content']
+                    
+                except Exception as e:
+                    # Fallback Logic
+                    if self.active_provider == "cerebras" and self._switch_provider("groq"):
+                        logger.warning(f"Primary provider failed ({e}). Retrying with Groq...")
+                        
+                        fallback_config = self.client_config["groq"]
+                        url = f"{fallback_config['base_url'].rstrip('/')}/chat/completions"
+                        
+                        payload = {
+                            "model": self.model,
+                            "messages": messages,
+                            "max_tokens": max_tokens,
+                            "temperature": temperature,
+                            "top_p": top_p,
+                            "stream": False,
+                            **kwargs
+                        }
+                        
+                        response = requests.post(
+                            url,
+                            headers=fallback_config["headers"],
+                            json=payload,
+                            timeout=timeout
+                        )
+                        response.raise_for_status()
+                        result = response.json()
+                        return result['choices'][0]['message']['content']
+                    else:
+                        raise e
             
-            result = self.circuit_breaker.call(api_call)
-            
-            # Extract response
-            if 'choices' not in result or not result['choices']:
-                raise ValueError("No response choices returned from API")
-            
-            response_text = result['choices'][0]['message']['content']
+            response_text = self.circuit_breaker.call(api_call)
             
             # Cache successful response
             if self.cache and cache_key:

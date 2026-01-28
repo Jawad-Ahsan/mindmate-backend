@@ -7,6 +7,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from sqlalchemy.exc import SQLAlchemyError
 import redis
 from core.config import settings
+import models  # Import models to register them with Base
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -29,7 +30,8 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Create declarative base
-Base = declarative_base()
+# Use the Base from models so we share the same metadata
+from models.sql_models.base_model import Base
 
 # Create Redis client (singleton)
 redis_client = redis.Redis(

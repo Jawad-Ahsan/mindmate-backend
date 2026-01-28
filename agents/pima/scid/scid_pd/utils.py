@@ -5,9 +5,9 @@ Specialized for personality disorder assessment
 """
 
 import json
-import numpy as np
 from datetime import datetime
 from typing import Dict, List, Any, Optional
+from statistics import mean
 
 from .base_types import (
     SCIDPDModule, SCIDPDQuestion, SCIDPDResponse, PersonalityModuleResult,
@@ -399,7 +399,7 @@ class SCIDPDAdministrator:
         onset_period = None
         avg_onset_age = None
         if onset_ages:
-            avg_onset_age = int(np.mean(onset_ages))
+            avg_onset_age = int(mean(onset_ages)) if onset_ages else 0
             if avg_onset_age < 12:
                 onset_period = OnsetCriteria.CHILDHOOD
             elif avg_onset_age < 18:
@@ -431,7 +431,7 @@ class SCIDPDAdministrator:
         if not onset_ages:
             return OnsetCriteria.UNKNOWN
         
-        avg_onset = np.mean(onset_ages)
+        avg_onset = mean(onset_ages) if onset_ages else 0
         
         if avg_onset < 12:
             return OnsetCriteria.CHILDHOOD

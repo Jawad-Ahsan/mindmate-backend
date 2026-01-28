@@ -21,17 +21,7 @@ from fastapi import APIRouter
 
 # from .forum.forum_router import router as forum_router
 
-# from .agents_routes.assessment_routes import router as assessment_router
-
-# from .agents_routes.tpa_routes import router as tpa_router
-
-# from .agents_routes.appointments_routes import router as appointment_manager_router
-
-# from .agents_routes.preferences_routes import router as preferences_router
-
-# from .agents_routes.da_routes import router as da_router
-
-# from .agents_routes.pima_router import router as pima_router
+from .agents_routes.assessment_router import router as assessment_router
 # from .authentication.patient_login import router as patient_authentication_router
 
 
@@ -45,12 +35,13 @@ from .specialist_routes.specialists_sma_routes import router as specialists_sma_
 from .specialist_routes.enhanced_specialist_routes import router as enhanced_specialist_router
 from .users import router as users_router
 from .questionnaires import router as questionnaires_router
-from .chat import router as chat_router
 from .journal import router as journal_router
 from .forum import router as forum_router
 from .admin import router as admin_router
 from .agents_routes.sma_router import router as sma_router
 from .chatbot_routes import router as chatbot_router
+
+from .consultation_routes import router as consultation_router
 
 # Create main auth router
 router = APIRouter()
@@ -70,12 +61,12 @@ router.include_router(specialists_sma_router)
 router.include_router(enhanced_specialist_router)
 router.include_router(users_router)
 router.include_router(questionnaires_router)
-router.include_router(chat_router)
 router.include_router(journal_router)
 router.include_router(forum_router)
 router.include_router(admin_router)
 router.include_router(sma_router)
 router.include_router(chatbot_router)
+router.include_router(consultation_router)
 
 # router.include_router(patient_authentication_router)
 # router.include_router(admin_router)            # Creates "auth" tag
@@ -96,19 +87,8 @@ router.include_router(chatbot_router)
 # router.include_router(forum_router)
 
 
-# #assesssment
-
-# router.include_router(assessment_router)
-
-# router.include_router(tpa_router)
-
-# router.include_router(appointment_manager_router)
-
-# router.include_router(preferences_router)
-
-# router.include_router(da_router)
-
-# router.include_router(pima_router)
+# Assessment routes
+router.include_router(assessment_router)
 
 #
 # Health check endpoint

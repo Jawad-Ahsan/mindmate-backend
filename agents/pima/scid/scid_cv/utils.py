@@ -4,9 +4,9 @@ Utility functions for SCID-CV administration and scoring
 """
 
 import json
-import numpy as np
 from datetime import datetime
 from typing import Dict, List, Any, Optional
+from statistics import mean
 
 from .base_types import (
     SCIDModule, SCIDQuestion, SCIDResponse, ModuleResult, 
@@ -399,7 +399,7 @@ class SCIDAdministrator:
         positive_results = [r for r in results if r.criteria_met]
         
         summary = {
-            "average_score": round(np.mean(scores) * 100, 1),
+            "average_score": round(mean(scores) * 100, 1) if scores else 0.0,
             "score_range": {
                 "min": round(min(scores) * 100, 1),
                 "max": round(max(scores) * 100, 1)

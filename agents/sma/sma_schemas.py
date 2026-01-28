@@ -238,3 +238,5 @@ class HealthCheckResponse(BaseModel):
     version: str
     database: str
     redis: str
+    service: Optional[str] = "sma"
+    message: Optional[str] = None

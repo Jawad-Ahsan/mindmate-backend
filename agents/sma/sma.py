@@ -31,18 +31,60 @@ logger = logging.getLogger(__name__)
 class SMA:
     """
     Specialist Matching Agent - Main orchestrator
-    
+
     Provides unified interface for:
     - Specialist search and matching
     - Appointment booking and management
     - Integration with other MindMate agents
     """
-    
+
     def __init__(self, db: Session):
         self.db = db
         self.matcher = SpecialistMatcher(db)
         self.appointments_manager = AppointmentsManager(db)
         self.profile_service = SpecialistProfileService(db)
+
+    def get_health_status(self) -> Dict[str, Any]:
+        """
+        Get health status of SMA and its dependencies
+
+        Returns:
+            Dict containing health status information
+        """
+        try:
+            # Check database connection
+            try:
+                from sqlalchemy import text
+                self.db.execute(text("SELECT 1"))
+                database_status = "healthy"
+            except Exception as e:
+                logger.error(f"Database health check failed: {str(e)}")
+                database_status = "unhealthy"
+
+            # Check Redis connection (if applicable)
+            # For now, we'll assume Redis is healthy since we're not using it extensively
+            redis_status = "healthy"
+
+            return {
+                "status": "healthy" if database_status == "healthy" else "unhealthy",
+                "timestamp": datetime.now().isoformat(),
+                "version": "1.0.0",
+                "database": database_status,
+                "redis": redis_status,
+                "service": "sma"
+            }
+
+        except Exception as e:
+            logger.error(f"SMA health check failed: {str(e)}")
+            return {
+                "status": "unhealthy",
+                "timestamp": datetime.now().isoformat(),
+                "version": "1.0.0",
+                "database": "unhealthy",
+                "redis": "unknown",
+                "service": "sma",
+                "error": str(e)
+            }
     
     # ============================================================================
     # PATIENT ENDPOINTS

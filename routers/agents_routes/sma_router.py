@@ -790,9 +790,10 @@ async def health_check(sma: SMA = Depends(get_sma)):
         logger.error(f"Health check failed: {str(e)}")
         return HealthCheckResponse(
             status="unhealthy",
-            service="sma",
-            timestamp=datetime.now().isoformat(),
+            timestamp=datetime.now(),
             version="1.0.0",
+            database="unhealthy",
+            redis="unknown",
             message=f"Health check failed: {str(e)}"
         )
 

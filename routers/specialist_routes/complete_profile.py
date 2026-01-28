@@ -86,7 +86,7 @@ class SpecializationItem(BaseModel):
 class ProfileCompletionRequest(BaseModel):
     """Request model for profile completion"""
     # Contact & Location Details
-    phone: str = Field(..., pattern=r'^\+?92[0-9]{10}$', description="Pakistani phone format: +92XXXXXXXXXX")
+    phone: str = Field(..., pattern=r'^(?:\+?92|0)3\d{9}$', description="Pakistani phone format: +92XXXXXXXXXX or 03XXXXXXXXX")
     address: str = Field(..., min_length=10, max_length=500, description="Complete address")
     clinic_name: Optional[str] = Field(None, max_length=200, description="Clinic or practice name")
     
@@ -104,6 +104,13 @@ class ProfileCompletionRequest(BaseModel):
     # Optional Professional Info
     website_url: Optional[str] = Field(None, description="Professional website (https://, http://, or www. format accepted)")
     social_media_links: Optional[Dict[str, str]] = Field(None, description="Social media profiles")
+    
+    @validator('phone', pre=True)
+    def clean_phone(cls, v):
+        if isinstance(v, str):
+            # Remove whitespace, hyphens, and parens
+            v = v.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+        return v
     
     @validator('specializations')
     def validate_specializations(cls, v):
