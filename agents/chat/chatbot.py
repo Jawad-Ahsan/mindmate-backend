@@ -81,18 +81,14 @@ class ConversationMemory:
             self.chat_session = ChatSession(
                 session_id=session_id,
                 patient_id=self.patient_id,
-                session_type="general",
-                status="active",
-                started_at=datetime.now(),
-                message_count=0,
-                user_message_count=0,
-                assistant_message_count=0
+                status="active"
+                # created_at and updated_at are handled by server_default
             )
             self.db_session.add(self.chat_session)
             self.db_session.commit()
-            logger.info(f"✅ Chat session initialized: {session_id}")
+            logger.info(f"Chat session initialized: {session_id}")
         except Exception as e:
-            logger.error(f"❌ Failed to initialize chat session: {e}")
+            logger.error(f"Failed to initialize chat session: {e}")
             self.chat_session = None
 
     def add_message(self, role: str, content: str, metadata: Dict = None):
@@ -124,63 +120,20 @@ class ConversationMemory:
         """Save message to database"""
         # Skip database operations if session management is disabled
         if not self.db_session or not self.chat_session:
-            logger.info(f"💡 Skipping database save for {role} message (session management disabled)")
             return
 
         try:
-            # Calculate word count
-            word_count = len(content.split()) if content else 0
-
-            # Create ChatMessage record
+            # Create ChatMessage record with only valid columns
             chat_message = ChatMessage(
                 session_id=self.chat_session.session_id,
                 role=role,
                 content=content,
-                message_index=self.session_data["message_count"],
-                word_count=word_count,
-                created_at=datetime.now()
+                metadata_json=metadata  # Store all metadata as JSON
             )
-
-            # Add metadata if provided
-            if metadata:
-                # Store emotion labels if available
-                if "emotions" in metadata:
-                    chat_message.add_emotion_labels(metadata["emotions"])
-
-                # Store crisis keywords if detected
-                if "crisis_keywords" in metadata:
-                    chat_message.add_crisis_keywords(metadata["crisis_keywords"])
-                    chat_message.contains_crisis_keywords = True
-
-                # Store intent classification
-                if "intent" in metadata:
-                    chat_message.intent_classification = metadata["intent"]
 
             self.db_session.add(chat_message)
             self.db_session.commit()
-
-            # Update session counters - re-query the session to ensure it's bound
-            # Get fresh session object from database
-            try:
-                fresh_session = self.db_session.query(ChatSession).filter(ChatSession.id == self.chat_session.id).first()
-                if fresh_session:
-                    if role == "user":
-                        fresh_session.user_message_count += 1
-                    elif role == "assistant":
-                        fresh_session.assistant_message_count += 1
-
-                    fresh_session.message_count += 1
-                    fresh_session.last_activity = datetime.now()
-                    self.db_session.commit()
-
-                    # Update our reference to the fresh session
-                    self.chat_session = fresh_session
-                    logger.info(f"✅ Updated session counters - Total: {fresh_session.message_count}, User: {fresh_session.user_message_count}, Assistant: {fresh_session.assistant_message_count}")
-                else:
-                    logger.warning(f"⚠️  Could not find session {self.chat_session.id} in database for counter update")
-            except Exception as session_error:
-                logger.error(f"⚠️  Failed to update session counters: {session_error}")
-                # Continue without updating counters - message is already saved
+            logger.debug(f"Saved {role} message to database")
 
         except Exception as e:
             logger.error(f"❌ Failed to save message to database: {e}")
@@ -553,8 +506,8 @@ CRISIS SITUATIONS:
 - Pakistan resources: Mental Health Helpline 0800-00-786
 - Emergency: Always suggest calling 1122
 
-Remember: You're a supportive friend, not a therapist. Keep it conversational, brief, and caring.""",
-            model="llama3-8b-8192"
+Remember: You're a supportive friend, not a therapist. Keep it conversational, brief, and caring."""
+            # Model is now inherited from environment config (CEREBRAS_MODEL)
         )
 
         self.db_session = db_session
@@ -963,19 +916,22 @@ Respond naturally like a supportive friend on WhatsApp:
             max_tokens=150
         )
         
+        # Debug logging to understand what LLM returns
+        logger.info(f"LLM Raw Response: {final_response[:200] if final_response else 'EMPTY'}")
+        
         # Clean up response - remove unwanted meta-text
         if final_response.startswith("Error:"):
+            logger.warning(f"LLM returned error: {final_response}")
             final_response = "I'm here for you. What's on your mind?"
         
-        # Remove common LLM meta-text patterns
+        # Remove common LLM meta-text patterns (but NOT the whole response)
         unwanted_patterns = [
             r"^Here's a revised response:\s*",
             r"^Here's a better response:\s*",
             r"^Let me try again:\s*",
             r"^Revised response:\s*",
             r"^Better response:\s*",
-            r"^\w+:\s*",  # Remove quoted speaker labels at start
-            r'"([^"]*)"',  # Remove quotes around entire response
+            # Removed overly aggressive pattern that was stripping valid responses
         ]
 
         import re
@@ -984,6 +940,11 @@ Respond naturally like a supportive friend on WhatsApp:
 
         # Clean up extra whitespace
         final_response = re.sub(r'\n\s*\n', '\n', final_response.strip())
+        
+        # Final safety check - if response is empty after cleanup, use fallback
+        if not final_response or len(final_response) < 5:
+            logger.warning(f"Response too short after cleanup, using fallback")
+            final_response = "I hear you. Tell me more about what's going on?"
 
         return {
             "final_response": final_response,
